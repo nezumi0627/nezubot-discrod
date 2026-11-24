@@ -2,7 +2,7 @@
 
 This is the single source the bot speaks from when asked what changed
 about itself: the latest entry is injected into the system prompt (see
-prompts.py), and n!status shows the latest version. Entries are factual
+prompts.py), and /status shows the latest version. Entries are factual
 release notes written when a change ships; never backfill invented
 changes here.
 """
@@ -18,6 +18,17 @@ class UpdateEntry:
 
 
 UPDATES: tuple[UpdateEntry, ...] = (
+    UpdateEntry(
+        "1.9.3",
+        "2026-11-24",
+        (
+            "ヘルプ・ステータス・利用枠の表示を、n! コマンド＋DM 送信から"
+            "スラッシュコマンド（/help /status /limit）に変更した。"
+            "応答は ephemeral で、使った本人だけに見える",
+            "n!help / n!status / n!limit は廃止し、打っても DM も公開投稿も"
+            "せず無反応にした。n!del は従来どおり使える",
+        ),
+    ),
     UpdateEntry(
         "1.9.2",
         "2026-11-24",
