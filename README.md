@@ -1,1 +1,148 @@
-IyBuZXp1Ym90LWRpc2Nyb2QKCiFbUHl0aG9uXShodHRwczovL2ltZy5zaGllbGRzLmlvL2JhZGdlL3B5dGhvbi0zLjEyJTJCLWJsdWUpCgrjg6Hjg7Pjgrfjg6fjg7PjgavnrZTjgYjjgosgRGlzY29yZCBBSSBCb3TjgILjgrXjg7zjg5Djg7zlhajkvZPjga7nmbroqIDjg63jgrDjgpLmpJzntKLvvIhSQUfvvInjgZfjgaYK6YGO5Y6744Gu5Lya6Kmx44KE5Lq654mp44Gr44Gk44GE44Gm562U44GI44CB44Oh44Oz44OQ44O844GU44Go44Gu6KiY5oa277yId2lrae+8ieOCkuaMgeOBoeOBvuOBmeOAggrkurrmoLzvvIhwZXJzb25h77yJ44Gv6Kit5a6a44OV44Kh44Kk44Or5YG044Gr5YiG6Zui44GX44Gm44GC44KL44Gu44Gn44CB5ZCN5YmN44KE5Y+j6Kq/44Gu5L6L5aSW44KSCuOCs+ODvOODieOCkuinpuOCieOBmuOBq+W3ruOBl+abv+OBiOOBpuOAgeWIpeOBruOCteODvOODkOODvOOBruWIpeOBriBCb3Qg44Go44GX44Gm5YaN6YWN5YKZ44Gn44GN44G+44GZ44CCCgojIyDnibnlvrQKCi0gKirjg6Hjg7Pjgrfjg6fjg7PvvI/ov5Tkv6Hjgbjjga4gQUkg5b+c562UKiog4oCUIOODl+ODreODkOOCpOODgOOBryBPcGVuQUkg5LqS5o+bIEFQSSDjgb7jgZ/jga8KICBDb2RleO+8iENoYXRHUFQg44Ot44Kw44Kk44Oz77yJ44Gu44Gp44Gh44KJ44GL44KS6YG45oqeCi0gKirjgrXjg7zjg5Djg7zjg63jgrAgUkFHKiog4oCUIOWFqOeZuuiogOOCkiBTUUxpdGXvvIhGVFM177yL5Z+L44KB6L6844G/44OZ44Kv44OI44Or77yJ44Gr6JOE56mN44GX44CBCiAg44Kt44O844Ov44O844OJ5qSc57Si44Go5oSP5ZGz5qSc57Si77yIUlJGIOiejeWQiO+8ieOBp+mBjuWOu+OBruS8muipseOCkuW8leOBjwotICoq44K144O844OQ44O8IFdpa2kqKiDigJQg44Ot44Kw44GL44KJ5Lq654mp44Go5Ye65p2l5LqL44Gu6Kaz5a+f44Oa44O844K444KS6Ieq5YuV55Sf5oiQ44GX44CBCiAg5Ye65YW45LuY44GN44Gn5qSc57Si44Gn44GN44KLCi0gKirjg6Hjg7Pjg5Djg7wgV2lraSoqIOKAlCDjg6bjg7zjgrbjg7zjgZTjgajjga7plbfmnJ/oqJjmhrbvvIjlpb3jgb/jg7vjg5fjg63jg5XjgqPjg7zjg6vvvIkKLSAqKuiqreOBv+WPluOCiuWwgueUqCBXZWIg44OE44O844OrKiog4oCUIFdlYiDmpJzntKLjg7vjg5rjg7zjgrjlj5blvpfjg7tXaWtpcGVkaWEKLSAqKuS9v+OBhOaNqOOBpiBEb2NrZXIg44K144Oz44OJ44Oc44OD44Kv44K5Kiog4oCUIOOCs+ODnuODs+ODieWun+ihjOOBr+malOmbouOCs+ODs+ODhuODiuWGheOAggogIOaXouWumuOBp+eEoeWKueWMluOCguWPrwotICoq44Kq44O844OK44O85bCC55So44Gu6Ieq5bex5pS55ZaEKiog4oCUIGAvaW1wcm92ZWAg44GL44KJ5om/6KqN5LuY44GNIFBSIOOCkuS9nOOCiwotICoq6ZW35paH5Zue562U44Gu44OG44Kj44O844K244O86KGo56S6Kiog4oCUIOS4gOWumumVt+OCkui2heOBiOOCi+WbnuetlOOBr+WGkumgreOBoOOBkeOCkgogIOODgeODo+ODs+ODjeODq+OBq+WHuuOBl+OAgeWFqOaWh+OCkuOCueODrOODg+ODieOBq+WIhuOBkeOCiwoKIyMg44K544Op44OD44K344Ol44Kz44Oe44Oz44OJCgp8IOOCs+ODnuODs+ODiSB8IOWGheWuuSB8CnwtLS18LS0tfAp8IGAvc2VhcmNoYCB8IOmWsuimp+OBp+OBjeOCi+OCteODvOODkOODvOODreOCsOOCkuaknOe0oiB8CnwgYC93aWtpYCB8IOOCteODvOODkOODvCBXaWtp77yI5Lq654mp44O75Ye65p2l5LqL77yJ44KS6Ieq5YiG44Gg44GR44Gr6KGo56S6IHwKfCBgL3Byb21wdGAgfCDlm7rlrprjga4gc3lzdGVtIHByb21wdCDjgpLooajnpLogfAp8IGAvaW1wcm92ZWAgfCDjgqrjg7zjg4rjg7zlsILnlKg6IOiHquW3seaUueWWhCBQUiDjgpLkvZzmiJAgfAp8IGAvcmVzZXRgIHwg44GT44Gu44OB44Oj44Oz44ON44Or44Gu5Lya6Kmx5bGl5q2044KS44Oq44K744OD44OIIHwKCiMjIOW/heimgeimgeS7tgoKLSBQeXRob24gMy4xMisKLSBEaXNjb3JkIEJvdCDjgqLjgqvjgqbjg7Pjg4jjgajjgIHlr77osaHjgrXjg7zjg5Djg7zjgbjjga7mi5vlvoUKICDvvIjjg6Hjg4Pjgrvjg7zjgrjlhoXlrrnjgqTjg7Pjg4bjg7Pjg4jjga7mnInlirnljJbjgYzlv4XopoHvvIkKLSBBSSDjg5fjg63jg5DjgqTjg4A6IE9wZW5BSSDkupLmj5sgQVBJIOOCreODvOOAgeOBvuOBn+OBryBDb2RleCBDTEnvvItDaGF0R1BUIOODreOCsOOCpOODswotIO+8iOS7u+aEj++8iURvY2tlcjogYHJ1bl9jb21tYW5kYCDjgrXjg7Pjg4njg5zjg4Pjgq/jgrnvvI/oh6rlt7HmlLnlloTjgpLkvb/jgYbloLTlkIgKLSDvvIjku7vmhI/vvInln4vjgoHovrzjgb/nlKjjga7oqIjnrpfos4fmupA6IOWIneWbnuOBruWFqOS7tuWfi+OCgei+vOOBv+OBr+S7tuaVsOOBq+W/nOOBmOOBpuaZgumWk+OBjOOBi+OBi+OCiwoKIyMg44Kv44Kk44OD44Kv44K544K/44O844OICgpgYGBiYXNoCmdpdCBjbG9uZSA844GT44GuIHJlcG8g44GuIFVSTD4KY2QgbmV6dWJvdC1kaXNjcm9kCmJhc2ggc2V0dXAuc2ggICAjIHZlbnYg5L2c5oiQ77yL5L6d5a2Y44Kk44Oz44K544OI44O844Or77yLIGRlcGxveS5lbnYg44Gu6Zub5b2i6YWN572uCmBgYAoKYGRlcGxveS5lbnZgIOOCkumWi+OBhOOBpuOAgeODiOODvOOCr+ODs+ODu2d1aWxkIElE44O7b3duZXIgSUTjg7tBSSDoqK3lrprjgpLoh6rliIbjga7lgKTjgasK5pu444GN5o+b44GI44Gf44KJ44CB6LW35YuV44GZ44KLOgoKYGBgYmFzaApiYXNoIHJ1bi5zaCAgICAgIyBkZXBsb3kuZW52IOOCkuiqreOBv+i+vOOCk+OBpyBCb3Qg44KS6LW35YuVCmBgYAoKLSBgRElTQ09SRF9HVUlMRF9JRGAg44GoIGBESVNDT1JEX09XTkVSX0lEYCDjga/lv4XpoIjjgafjgIHmnKroqK3lrprjgaDjgagKICDotbfli5XmmYLjgavkvZXjgYzotrPjgorjgarjgYTjgYvliIbjgYvjgovjgqjjg6njg7zjgafmraLjgb7jgosKLSBgZGVwbG95LmVudmAg44Gv5qip6ZmQIDYwMCDjgafkvZzjgonjgozjgovjgILntbblr77jgavjgrPjg5/jg4Pjg4jjgZfjgarjgYQKICDvvIhgLmdpdGlnbm9yZWAg5riI44G/77yJCi0g6LW35YuV5b6M44CBQm90IOOBjOWvvuixoeOCteODvOODkOODvOOBrueZuuiogOOCkuODkOODg+OCr+ODleOCo+ODq+OBl+OAgeWfi+OCgei+vOOBv+OCkueUn+aIkOOBmeOCiwogIOOBvuOBp+W+heOBo+OBpuOBi+OCieOAgeODoeODs+OCt+ODp+ODs+OBp+W/nOetlOOCkueiuuiqjeOBmeOCiwotIOaJi+WLleOBp+WQjOOBmOOBk+OBqOOCkuOChOOCi+WgtOWQiDogYHB5dGhvbiAtbSB2ZW52IC52ZW52YCDihpIKICBgLnZlbnYvYmluL3BpcCBpbnN0YWxsIC1lICcuW2RldixyYWddJ2Ag4oaSIGBkZXBsb3kuZW52LmV4YW1wbGVgIOOCkgogIGBkZXBsb3kuZW52YCDjgavjgrPjg5Tjg7zjgZfjgabnt6jpm4Yg4oaSIGVudiDjgpLoqq3jgb/ovrzjgpPjgacgYG5lenVib3QtZGlzY3JvZGAKCuOCteODvOODkOODvCBXaWtpIOOCkuOBvuOBqOOCgeOBpuWGjeani+evieOBmeOCi+WgtOWQiDoKCmBgYGJhc2gKLnZlbnYvYmluL3B5dGhvbiAtbSBuZXp1Ym90X2Rpc2Nyb2Quc2VydmVyX3dpa2kgLS1kYiAiJEhPTUUvLm5lenVib3QtZGlzY3JvZC9zZXJ2ZXJfbG9nLmRiIgpgYGAKCiMjIOioreWumgoKLSDlhajpoIXnm67jga8gYGRlcGxveS5lbnYuZXhhbXBsZWAg44KS5Y+C54Wn77yI44Kz44O844OJ44GM6Kqt44KAIGVudiDjgpLntrLnvoXjgIEKICDlhajlgKTjg5fjg6zjg7zjgrnjg5vjg6vjg4DvvIvnlKjpgJTjgrPjg6Hjg7Pjg4jku5jjgY3vvIkKLSAqKuODmuODq+OCveODiioqOiBgQk9UX05BTUVg77yIQm90IOOBruWQjeS5l+OCiu+8ieOAgWBCT1RfUkVQT19VUkxg77yI6Ieq5bex57S55LuL44GnCiAg6KiA5Y+K44GZ44KLIFVSTOOAgeS7u+aEj++8ieOAgWBQRVJTT05BX1JJVkFMX1VTRVJfSURgIC8gYFBFUlNPTkFfUklWQUxfTkFNRWAKICDvvIjnibnlrprjg6bjg7zjgrbjg7zjgbjjga7lj6Poqr/jga7kvovlpJbjgIHku7vmhI/vvInjgILjg5fjg63jg7Pjg5fjg4jmnKzmlofjga8KICBgbmV6dWJvdF9kaXNjcm9kL3Byb21wdHMucHlg44CB44Oa44Or44K944OK44Gu6Kqt44G/6L6844G/44GvCiAgYG5lenVib3RfZGlzY3JvZC9wZXJzb25hLnB5YCDjgYzmi4XjgYYKLSAqKuODh+ODvOOCv+mFjee9rioqOiBEQiDnrYnjga8gYERBVEFfRElSYO+8iOaXouWumiBgfi8ubmV6dWJvdC1kaXNjcm9kYO+8iemFjeS4iwoKIyMg44OH44O844K/44Gr44Gk44GE44Gm77yI6YeN6KaB77yJCgotICoq44GT44GuIHJlcG8g44Gr44OH44O844K/44Gv5ZCr44G+44KM44Gm44GE44G+44Gb44KT44CCKioKLSDjgrXjg7zjg5Djg7zjg63jgrAgRELjg7vjgrXjg7zjg5Djg7wgV2lraeODu+ODoeODs+ODkOODvCBXaWtp44O75Z+L44KB6L6844G/44OZ44Kv44OI44Or44Gv44CBCiAg5Yip55So6ICF44GM6Ieq5YiG44Gu44K144O844OQ44O844Gu44OH44O844K/44GL44KJ6Ieq5YiG44Gn55Sf5oiQ44GZ44KL44KC44Gu44Gn44GZ44CCCiAg5LuW5Lq644Gu44K144O844OQ44O844Gu44OH44O844K/44KS5oyB44Gh6L6844KA44GT44Go44Gv5oOz5a6a44GX44Gm44GE44G+44Gb44KT44CCCi0g5pei5a2Y44Gu44Ki44O844Kr44Kk44OWIERCIOOCkuaMgeOBoei+vOOCgOWgtOWQiOOBr+OAgeOBneOBruOCteODvOODkOODvOOBruWPguWKoOiAheOBruWQjOaEj+OBqAogIOODl+ODqeOCpOODkOOCt+ODvOOBq+WQhOiHquOBp+iyrOS7u+OCkuaMgeOBo+OBpuOBj+OBoOOBleOBhOOAggoKIyMg6YGL55So44Oh44OiCgotIEJvdCDjga/ljZjkuIDjgqTjg7Pjgrnjgr/jg7Pjgrnjgafli5XjgYvjgZnjgZPjgajvvIjkuozph43otbfli5XjgZnjgovjgajkuozph43jgavnrZTjgYjjgovjgIIKICDotbfli5Xjgrnjgq/jg6rjg5fjg4jlgbTjgafjga7jg63jg4Pjgq/kvbXnlKjjgpLmjqjlpajvvIkKLSDjg63jgrDjg7tEQuODu2BkZXBsb3kuZW52YCDjga8gcmVwbyDjgavjgrPjg5/jg4Pjg4jjgZfjgarjgYTvvIhgLmdpdGlnbm9yZWAg5riI44G/77yJCi0gYGhvc3QtdG9vbHMvYCDjga/jgIFEaXNjb3JkIOOBuOOBruebtOaOpeaOpee2muOBjOOBp+OBjeOBquOBhOeJueauiuOBquODjeODg+ODiOODr+ODvOOCrwogIOeSsOWig+WQkeOBkeOBruODl+ODreOCreOCt+S4ree2meOBrumFjeWCmeS+i+OAgumAmuW4uOOBrui1t+WLleOBq+OBr+S4jeimgeOBp+OAgQogIOaXouWumuOBrui1t+WLlee1jOi3r++8iGBydW4uc2hg77yJ44Gr44Gv5ZCr44G+44KM44Gm44GE44Gq44GECgojIyDjg4njgq3jg6Xjg6Hjg7Pjg4gKCi0gYGRvY3Mvd2luZG93cy5tZGAg4oCUIFdpbmRvd3MgLyBXU0wg44Gn44Gu5bi46aeQ44Ks44Kk44OJCi0gYGRvY3MvQURBUFRJVkUtTUVNT1JZLUVOR0lORS5tZGAgLyBgZG9jcy9BREFQVElWRS1NRU1PUlktRU5HSU5FLVJFU0VBUkNILm1kYAogIOKAlCDpganlv5zlnovjg6Hjg6Ljg6rvvIhSQUfvvInjga7oqK3oqIjmpJzoqI4KLSBgZG9jcy9PUFRJTUlaQVRJT04tQVVESVQubWRgIOKAlCDmpJzntKLjg7vmp4vpgKDjga7nm6Pmn7voqJjpjLIKLSBgZG9jcy9PUFRJTUlaQVRJT04tV09SS0xPRy5tZGAg4oCUIFJBRyDmnIDpganljJbjga7kvZzmpa3oqJjpjLLvvIjmuKzlrprlgKTku5jjgY3vvIkKCiMjIOmWi+eZugoKYGBgYmFzaAoudmVudi9iaW4vcnVmZiBjaGVjayAuCi52ZW52L2Jpbi9weXRlc3QgLXEKYGBgCgojIyDlj4LogIMKCi0gV2ViIOODhOODvOODq+OBruioreioiOOBryBbZXZleC1xdW90ZXMg44GuIFdlYiDjg4Tjg7zjg6tdKGh0dHBzOi8vZ2l0aHViLmNvbS9ha2t1MTEzOS9ldmV4LXF1b3Rlcy90cmVlL21haW4vc3JjL2FpdG9vbHMpIOOCkuWPguiAg+OBq+OBl+OBpuOBhOOBvuOBme+8iOWklumDqOODl+ODreOCuOOCp+OCr+ODiO+8ieOAggoKIyMg44Op44Kk44K744Oz44K5CgpUQkTvvIjmnKrlrprvvIkK
+# nezubot-discrod
+
+![Python](https://img.shields.io/badge/python-3.12%2B-blue)
+
+メンションに答える Discord AI Bot。サーバー全体の発言ログを検索（RAG）して
+過去の会話や人物について答え、メンバーごとの記憶（wiki）を持ちます。
+人格（persona）は設定ファイル側に分離してあるので、名前や口調の例外を
+コードを触らずに差し替えて、別のサーバーの別の Bot として再配備できます。
+
+## 特徴
+
+- **メンション／返信への AI 応答** — プロバイダは OpenAI 互換 API または
+  Codex（ChatGPT ログイン）のどちらかを選択
+- **サーバーログ RAG** — 全発言を SQLite（FTS5＋埋め込みベクトル）に蓄積し、
+  キーワード検索と意味検索（RRF 融合）で過去の会話を引く
+- **サーバー Wiki** — ログから人物と出来事の観察ページを自動生成し、
+  出典付きで検索できる
+- **メンバー Wiki** — ユーザーごとの長期記憶（好み・プロフィール）
+- **読み取り専用 Web ツール** — Web 検索・ページ取得・Wikipedia
+- **使い捨て Docker サンドボックス** — コマンド実行は隔離コンテナ内。
+  既定で無効化も可
+- **オーナー専用の自己改善** — `/improve` から承認付き PR を作る
+- **長文回答のティーザー表示** — 一定長を超える回答は冒頭だけを
+  チャンネルに出し、全文をスレッドに分ける
+- **`n!` プレフィックスコマンド** — メンション不要で、学習状況や
+  利用枠の確認、自分の発言の取り消しができる（下表）
+- **会話理解** — 呼ばれた発言のリプライ先（数ホップ遡る）と直近の
+  チャンネルの流れをその場で読み、メンションされた人物を表示名と
+  Discord ID の対応つきで把握。「この人物」などの指示語は
+  リプライ先の著者 → メンションされた人 → 直近の発言者の順で解決する
+- **プロンプトキャッシュ最適化** — Codex 利用時は app-server を
+  常駐させ、チャンネルごとの会話スレッドを使い回す。2 ターン目以降は
+  新しい発言だけを送るため、入力の大半がキャッシュから処理される
+- **更新履歴の自己申告** — Bot 自身の変更履歴を保持し、「何が変わった？」と
+  聞かれたら履歴に基づいて答える。最新の変更は system prompt にも入る
+
+## プレフィックスコマンド
+
+メッセージの先頭に付ける。メンションは不要。
+
+| コマンド | 内容 |
+|---|---|
+| `n!help` | 使い方を表示 |
+| `n!del` | Bot の発言にリプライして送ると、その発言を取り消す（質問した本人かサーバーオーナーだけ） |
+| `n!status` | 学習状況（総メッセージ数・学習人数・チャンネル数・学習率・サーバー Wiki 記事数など）を表示 |
+| `n!limit` | ChatGPT/Codex サブスクリプションの利用枠（5 時間枠・週間枠の残り % とリセット時刻）を表示 |
+
+## スラッシュコマンド
+
+| コマンド | 内容 |
+|---|---|
+| `/search` | 閲覧できるサーバーログを検索 |
+| `/wiki` | サーバー Wiki（人物・出来事）を自分だけに表示 |
+| `/prompt` | 固定の system prompt を表示 |
+| `/improve` | オーナー専用: 自己改善 PR を作成 |
+| `/reset` | このチャンネルの会話履歴をリセット |
+
+## 必要要件
+
+- Python 3.12+
+- Discord Bot アカウントと、対象サーバーへの招待
+  （メッセージ内容インテントの有効化が必要）
+- AI プロバイダ: OpenAI 互換 API キー、または Codex CLI＋ChatGPT ログイン
+- （任意）Docker: `run_command` サンドボックス／自己改善を使う場合
+- （任意）埋め込み用の計算資源: 初回の全件埋め込みは件数に応じて時間がかかる
+
+## クイックスタート
+
+```bash
+git clone <この repo の URL>
+cd nezubot-discrod
+bash setup.sh   # venv 作成＋依存インストール＋ deploy.env の雛形配置
+```
+
+`deploy.env` を開いて、トークン・guild ID・owner ID・AI 設定を自分の値に
+書き換えたら、起動する:
+
+```bash
+bash run.sh     # deploy.env を読み込んで Bot を起動
+```
+
+- `DISCORD_GUILD_ID` と `DISCORD_OWNER_ID` は必須で、未設定だと
+  起動時に何が足りないか分かるエラーで止まる
+- `deploy.env` は権限 600 で作られる。絶対にコミットしない
+  （`.gitignore` 済み）
+- 起動後、Bot が対象サーバーの発言をバックフィルし、埋め込みを生成する
+  まで待ってから、メンションで応答を確認する
+- 手動で同じことをやる場合: `python -m venv .venv` →
+  `.venv/bin/pip install -e '.[dev,rag]'` → `deploy.env.example` を
+  `deploy.env` にコピーして編集 → env を読み込んで `nezubot-discrod`
+
+サーバー Wiki をまとめて再構築する場合:
+
+```bash
+.venv/bin/python -m nezubot_discrod.server_wiki --db "$HOME/.nezubot-discrod/server_log.db"
+```
+
+## 設定
+
+- 全項目は `deploy.env.example` を参照（コードが読む env を網羅、
+  全値プレースホルダ＋用途コメント付き）
+- **ペルソナ**: `BOT_NAME`（Bot の名乗り）、`BOT_REPO_URL`（自己紹介で
+  言及する URL、任意）、`PERSONA_RIVAL_USER_ID` / `PERSONA_RIVAL_NAME`
+  （特定ユーザーへの口調の例外、任意）。プロンプト本文は
+  `nezubot_discrod/prompts.py`、ペルソナの読み込みは
+  `nezubot_discrod/persona.py` が担う
+- **データ配置**: DB 等は `DATA_DIR`（既定 `~/.nezubot-discrod`）配下
+
+## データについて（重要）
+
+- **この repo にデータは含まれていません。**
+- サーバーログ DB・サーバー Wiki・メンバー Wiki・埋め込みベクトルは、
+  利用者が自分のサーバーのデータから自分で生成するものです。
+  他人のサーバーのデータを持ち込むことは想定していません。
+- 既存のアーカイブ DB を持ち込む場合は、そのサーバーの参加者の同意と
+  プライバシーに各自で責任を持ってください。
+
+## 運用メモ
+
+- Bot は単一インスタンスで動かすこと（二重起動すると二重に答える。
+  起動スクリプト側でのロック併用を推奨）
+- ログ・DB・`deploy.env` は repo にコミットしない（`.gitignore` 済み）
+- `host-tools/` は、Discord への直接接続ができない特殊なネットワーク
+  環境向けのプロキシ中継の配備例。通常の起動には不要で、
+  既定の起動経路（`run.sh`）には含まれていない
+
+## ドキュメント
+
+- `docs/windows.md` — Windows / WSL での常駐ガイド
+- `docs/ADAPTIVE-MEMORY-ENGINE.md` / `docs/ADAPTIVE-MEMORY-ENGINE-RESEARCH.md`
+  — 適応型メモリ（RAG）の設計検討
+- `docs/OPTIMIZATION-AUDIT.md` — 検索・構造の監査記録
+- `docs/OPTIMIZATION-WORKLOG.md` — RAG 最適化の作業記録（測定値付き）
+
+## 開発
+
+```bash
+.venv/bin/ruff check .
+.venv/bin/pytest -q
+```
+
+## 参考
+
+- Web ツールの設計は [evex-quotes の Web ツール](https://github.com/akku1139/evex-quotes/tree/main/src/aitools) を参考にしています（外部プロジェクト）。
+
+## ライセンス
+
+TBD（未定）
