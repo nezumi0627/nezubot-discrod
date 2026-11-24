@@ -95,6 +95,34 @@ def test_message_routes_discord_identity_to_the_assistant(guild):
     channel.send.assert_awaited_once_with("reply\n-# test")
 
 
+@pytest.mark.parametrize("busy", [{1}, set(range(16))])
+def test_busy_gate_drops_message_silently(busy):
+    # The busy gate must never post a "処理中です" style notice to the
+    # channel: the trigger is dropped without any visible message.
+    user = SimpleNamespace(id=99)
+    channel = SimpleNamespace(id=1, send=AsyncMock(), typing=Mock(side_effect=asyncio.Lock))
+    bot = SimpleNamespace(
+        settings=settings(),
+        user=user,
+        busy=busy,
+        slots=asyncio.Semaphore(4),
+        assistant=SimpleNamespace(reply=AsyncMock(return_value="reply")),
+    )
+    message = SimpleNamespace(
+        author=SimpleNamespace(
+            id=456, bot=False, name="testuser", display_name="テストユーザー", nick=None,
+        ),
+        content="<@99> hello",
+        guild=SimpleNamespace(id=123),
+        channel=channel,
+        mentions=[user],
+        id=1000,
+    )
+    asyncio.run(Bot.on_message(bot, message))
+    channel.send.assert_not_awaited()
+    bot.assistant.reply.assert_not_awaited()
+
+
 def _text_channel():
     import discord
 
