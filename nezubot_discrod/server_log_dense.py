@@ -111,6 +111,31 @@ class DenseIndex:
         self.sequence = None
         self.model = store.model
         self.static_model = None
+        # Hybrid retrieval: an optional second dense path (e.g. a
+        # fine-tuned model) whose vectors live under aux_model. It needs
+        # its own query encoder (an ONNX dir or an injected embedder);
+        # without one it stays off and search is exactly as before.
+        self.aux_model = getattr(store, "hybrid_model", None)
+        self.aux_onnx_dir = getattr(store, "hybrid_onnx_dir", None)
+        self._aux_embedder_arg = getattr(store, "_hybrid_embedder", None)
+        if not (self.aux_model and (self.aux_onnx_dir or self._aux_embedder_arg)):
+            self.aux_model = None
+        self.aux_embedder = None
+        self.aux_failed = False
+        self.aux_ids = {}
+        self.aux_matrix = None
+        self.aux_size = 0
+        self.aux_reserve_hint = 0
+        self.aux_channels = np.empty(0, dtype=np.int32)
+        self.aux_authors = np.empty(0, dtype=np.int32)
+        self.aux_channel_names = np.empty(0, dtype=np.int32)
+        self.aux_dates = np.empty(0, dtype="S32")
+        self.aux_active = np.empty(0, dtype=bool)
+        self.aux_message_ids = []
+        self.aux_sort_keys = []
+        self.aux_versions = []
+        self.aux_sequence = None
+        self.aux_queries = OrderedDict()
         self.rebuilds = 0
         self.ids = {}
         self.matrix = None
@@ -143,8 +168,11 @@ class DenseIndex:
         """)
 
     def encode(self, texts, *, query=False):
+        return self._encode_with(self.embedder, self.store.model, texts, query=query)
+
+    def _encode_with(self, embedder, model, texts, *, query=False):
         prefix = ""
-        if "e5" in self.store.model.lower():
+        if "e5" in model.lower():
             prefix = "query: " if query else "passage: "
         if query:
             # Register as a waiting query so passage (document) encoding
@@ -168,7 +196,7 @@ class DenseIndex:
             raise
         try:
             vectors = self.np.asarray(
-                list(self.embedder.embed([prefix + text for text in texts])),
+                list(embedder.embed([prefix + text for text in texts])),
                 dtype=self.np.float32,
             )
         finally:
@@ -456,6 +484,257 @@ class DenseIndex:
                 self.queries.popitem(last=False)
         return vector
 
+    def _aux_encoder(self):
+        if self.aux_embedder is None and not self.aux_failed:
+            try:
+                if self._aux_embedder_arg is not None:
+                    self.aux_embedder = self._aux_embedder_arg
+                else:
+                    from nezubot_discrod.local_embedder import LocalE5Embedder
+
+                    self.aux_embedder = LocalE5Embedder(
+                        self.aux_onnx_dir, max_length=self.store.max_length
+                    )
+            except Exception:
+                self.aux_failed = True
+                logger.warning(
+                    "Hybrid embedder unavailable; hybrid search disabled", exc_info=True
+                )
+        return self.aux_embedder
+
+    def _aux_query_vector(self, query):
+        key = self.aux_model, self.store.max_length, query
+        with self.query_cache_lock:
+            vector = self.aux_queries.get(key)
+        if vector is None:
+            embedder = self._aux_encoder()
+            if embedder is None:
+                return None
+            vector = self._encode_with(embedder, self.aux_model, [query], query=True)[0]
+        with self.query_cache_lock:
+            self.aux_queries[key] = vector
+            self.aux_queries.move_to_end(key)
+            while len(self.aux_queries) > self.query_cache_size:
+                self.aux_queries.popitem(last=False)
+        return vector
+
+    def _aux_reserve(self, count, dimensions):
+        if self.aux_matrix is not None and self.aux_matrix.shape[1] != dimensions:
+            raise ValueError("Inconsistent hybrid vector dimensions")
+        if self.aux_matrix is not None and len(self.aux_matrix) >= count:
+            return
+        capacity = max(1024, count, self.aux_reserve_hint, int(self.aux_size * 1.5))
+        self.aux_reserve_hint = 0
+        matrix = self.np.empty((capacity, dimensions), dtype=self.np.float32)
+        channels = self.np.empty(capacity, dtype=self.np.int32)
+        authors = self.np.empty(capacity, dtype=self.np.int32)
+        channel_names = self.np.empty(capacity, dtype=self.np.int32)
+        dates = self.np.empty(capacity, dtype="S32")
+        active = self.np.zeros(capacity, dtype=bool)
+        if self.aux_matrix is not None:
+            matrix[:self.aux_size] = self.aux_matrix[:self.aux_size]
+            channels[:self.aux_size] = self.aux_channels[:self.aux_size]
+            authors[:self.aux_size] = self.aux_authors[:self.aux_size]
+            channel_names[:self.aux_size] = self.aux_channel_names[:self.aux_size]
+            dates[:self.aux_size] = self.aux_dates[:self.aux_size]
+            active[:self.aux_size] = self.aux_active[:self.aux_size]
+        self.aux_matrix, self.aux_channels, self.aux_authors = matrix, channels, authors
+        self.aux_channel_names, self.aux_dates, self.aux_active = (
+            channel_names, dates, active
+        )
+
+    def _aux_place(self, row):
+        message_id = row["id"]
+        index = self.aux_ids.get(message_id)
+        if index is not None:
+            self.aux_active[index] = False
+        if (
+            row["deleted"] or row["tombstoned"] or row["is_bot"]
+            or len(row["text"].strip()) < 2
+        ):
+            return
+        if row["vector"] is None or row["vector_hash"] != text_hash(row):
+            # No hybrid vector (or a stale one): the message is simply
+            # absent from the hybrid path until the embedder catches up.
+            return
+        vector = self.np.frombuffer(row["vector"], dtype="<f2").astype(self.np.float32)
+        norm = self.np.linalg.norm(vector)
+        if (
+            len(vector) != row["dimensions"] or not len(vector)
+            or not self.np.isfinite(vector).all() or norm == 0
+        ):
+            raise ValueError("Invalid stored hybrid vector")
+        if self.snapshot_mode:
+            index = None
+        self._aux_reserve(self.aux_size + (index is None), len(vector))
+        if index is None:
+            index = self.aux_size
+            self.aux_size += 1
+            self.aux_ids[message_id] = index
+            self.aux_message_ids.append(message_id)
+            self.aux_sort_keys.append(None)
+            self.aux_versions.append(None)
+        self.aux_matrix[index] = vector / norm
+        self.aux_versions[index] = (row["vector_hash"], row["dimensions"],
+                                    hashlib.sha256(row["vector"]).digest())
+        self.aux_channels[index] = self.channel_codes.setdefault(
+            row["channel_id"], len(self.channel_codes)
+        )
+        self.aux_authors[index] = self.author_codes.setdefault(
+            row["author_id"], len(self.author_codes)
+        )
+        self.aux_channel_names[index] = self.channel_name_codes.setdefault(
+            row["channel_name"], len(self.channel_name_codes)
+        )
+        self.aux_dates[index] = row["created_at"].encode("ascii")
+        self.aux_sort_keys[index] = (row["channel_id"], row["created_at"], message_id)
+        self.aux_active[index] = True
+
+    _AUX_SELECT = """
+        SELECT m.*, v.text_hash AS vector_hash, v.vector, v.dimensions,
+            EXISTS (SELECT 1 FROM deleted_messages d WHERE d.id = m.id) AS tombstoned
+        FROM messages m JOIN message_vectors v ON v.message_id = m.id AND v.model = ?
+    """
+
+    def _aux_sync(self, db):
+        if self.aux_model is None:
+            return
+        sequence = db.execute(
+            "SELECT sequence FROM dense_state WHERE id = 1"
+        ).fetchone()[0]
+        if self.aux_sequence is not None and sequence == self.aux_sequence:
+            return
+        full = (
+            self.aux_sequence is None
+            or self.snapshot_mode and self.aux_size > max(1024, len(self.aux_ids) * 2)
+        )
+        if full:
+            self.aux_ids.clear()
+            self.aux_message_ids.clear()
+            self.aux_sort_keys.clear()
+            self.aux_versions.clear()
+            self.aux_size = 0
+            self.aux_matrix = None
+            self.aux_reserve_hint = db.execute(
+                "SELECT count(*) FROM message_vectors WHERE model = ?",
+                (self.aux_model,),
+            ).fetchone()[0] + 1024
+            rows = db.execute(
+                self._AUX_SELECT + " ORDER BY m.channel_id, m.created_at, m.id",
+                (self.aux_model,),
+            )
+            while batch := rows.fetchmany(512):
+                for row in batch:
+                    self._aux_place(row)
+        else:
+            changed = [row[0] for row in db.execute(
+                "SELECT message_id FROM dense_changes WHERE version > ?",
+                (self.aux_sequence,),
+            )]
+            for start in range(0, len(changed), 500):
+                batch = changed[start:start + 500]
+                for message_id in batch:
+                    if (index := self.aux_ids.get(message_id)) is not None:
+                        self.aux_active[index] = False
+                rows = db.execute(
+                    self._AUX_SELECT
+                    + f" WHERE m.id IN ({','.join('?' for _ in batch)})",
+                    (self.aux_model, *batch),
+                )
+                for row in rows:
+                    self._aux_place(row)
+        self.aux_sequence = sequence
+
+    def search_aux_snapshot(self, *args, **kwargs):
+        snapshot = self.snapshot
+        self.request_refresh()
+        if snapshot is None or snapshot.aux_model is None or snapshot.aux_matrix is None:
+            return None
+        return snapshot.search_aux(*args, **kwargs, synchronize=False)
+
+    def search_aux(
+        self, db, query, channel_ids, where, args, limit, *, author_ids=None,
+        channel=None, after=None, before=None, synchronize=True,
+    ):
+        """Dense search over the hybrid (aux) model's vectors.
+
+        Mirrors search() scope and validation semantics. Returns None
+        whenever the hybrid path has nothing usable; the caller then
+        fuses the primary paths exactly as before.
+        """
+        if self.aux_model is None:
+            return None
+        with stage("cache_lock_wait"):
+            self.cache_lock.acquire()
+        try:
+            try:
+                if synchronize:
+                    with stage("cache_sync"):
+                        self._aux_sync(db)
+            except ValueError:
+                self.aux_sequence = None
+                raise
+            if self.aux_matrix is None or not self.aux_size:
+                return None
+            codes = [self.channel_codes[str(c)] for c in channel_ids
+                     if str(c) in self.channel_codes]
+            permitted = self.np.isin(
+                self.aux_channels[:self.aux_size], codes
+            ) & self.aux_active[:self.aux_size]
+            if author_ids is not None:
+                authors = [self.author_codes[a] for a in author_ids
+                           if a in self.author_codes]
+                permitted &= self.np.isin(self.aux_authors[:self.aux_size], authors)
+            count = int(permitted.sum())
+            if not count:
+                return None
+            with stage("aux_query_embedding"):
+                vector = self._aux_query_vector(query)
+            if vector is None:
+                return None
+            with _BLAS_LOCK, self.threadpool_limits(limits=1, user_api="blas"):
+                scores = self.aux_matrix[:self.aux_size] @ vector
+            scores[~permitted] = -self.np.inf
+            fetch = min(count, max(200, limit * 4))
+            while True:
+                top = self.np.argpartition(scores, -fetch)[-fetch:]
+                cutoff = scores[top].min()
+                top = self.np.flatnonzero(scores >= cutoff)
+                top = sorted(
+                    top, key=lambda i: (-float(scores[i]), self.aux_sort_keys[i])
+                )[:fetch]
+                ids = [self.aux_message_ids[i] for i in top]
+                if synchronize:
+                    valid = {row[0] for row in db.execute(
+                        f"SELECT m.id FROM messages m WHERE {where} AND m.is_bot = 0 "
+                        "AND m.id IN (SELECT value FROM json_each(?))",
+                        [*args, json.dumps(ids)],
+                    )}
+                else:
+                    versions = {self.aux_message_ids[i]: self.aux_versions[i]
+                                for i in top}
+                    valid = set()
+                    for row in db.execute(
+                        "SELECT m.*, v.text_hash AS vector_hash, v.dimensions, v.vector "
+                        "FROM messages m JOIN message_vectors v ON v.message_id = m.id "
+                        f"AND v.model = ? WHERE {where} AND m.is_bot = 0 "
+                        "AND m.id IN (SELECT value FROM json_each(?))",
+                        [self.aux_model, *args, json.dumps(ids)],
+                    ):
+                        version = (row["vector_hash"], row["dimensions"],
+                                   hashlib.sha256(row["vector"]).digest())
+                        if (version == versions[row["id"]]
+                                and text_hash(row) == row["vector_hash"]):
+                            valid.add(row["id"])
+                result = [message_id for message_id in ids if message_id in valid]
+                if len(result) >= limit or fetch == count:
+                    # Coverage attributes are informational only here;
+                    # fusion mode is driven by the primary path's hits.
+                    return DenseHits(result[:limit], partial=False, coverage=1.0)
+                fetch = min(count, fetch * 2)
+        finally:
+            self.cache_lock.release()
+
     def refresh_snapshot(self):
         self.snapshot_mode = True
         with self.cache_lock, self.store.connect() as db:
@@ -467,13 +746,20 @@ class DenseIndex:
             try:
                 if not self._sync(db):
                     return
+                self._aux_sync(db)
             except ValueError:
                 self.sequence = None
+                self.aux_sequence = None
                 raise
             snapshot = copy(self)
             snapshot.snapshot = None
             snapshot.cache_lock = Lock()
             snapshot.active = self.active.copy()
+            snapshot.aux_active = self.aux_active.copy()
+            snapshot.aux_message_ids = self.aux_message_ids[:]
+            snapshot.aux_sort_keys = self.aux_sort_keys[:]
+            snapshot.aux_versions = self.aux_versions[:]
+            snapshot.aux_queries = OrderedDict()
             snapshot.channel_codes = self.channel_codes.copy()
             snapshot.author_codes = self.author_codes.copy()
             snapshot.channel_name_codes = self.channel_name_codes.copy()

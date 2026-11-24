@@ -335,7 +335,13 @@ class Bot(discord.Client):
             return
         channel = message.channel
         if channel.id in self.busy or len(self.busy) >= 16:
-            await channel.send("処理中です。少し待ってから再試行してください。")
+            # Busy gate: drop the trigger silently. A "busy, retry later"
+            # notice posted to the channel is noise the owner asked to
+            # remove (2026-11-24); the drop stays visible in the log only.
+            logger.info(
+                "Dropping message in busy channel %s (busy=%d)",
+                channel.id, len(self.busy),
+            )
             return
         content = (
             message.content.replace(f"<@{self.user.id}>", "")

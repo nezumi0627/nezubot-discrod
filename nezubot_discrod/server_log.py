@@ -184,7 +184,8 @@ def _name(value):
     return " ".join(unicodedata.normalize("NFKC", str(value)).casefold().split()).removeprefix("@")
 
 
-def _fusion(query, lexical, dense, limit, *, partial=False, dense_coverage=None):
+def _fusion(query, lexical, dense, limit, *, partial=False, dense_coverage=None,
+            extra_dense=None):
     if partial and (dense_coverage is None or dense_coverage < 0.9):
         ids = [row["id"] for row in lexical]
         lexical_ids = set(ids)
@@ -196,7 +197,10 @@ def _fusion(query, lexical, dense, limit, *, partial=False, dense_coverage=None)
             if i + 5 < len(ids):
                 result.append(ids[i + 5])
         return result[:limit]
-    tail = rrf([[row["id"] for row in lexical], dense], limit)
+    lists = [[row["id"] for row in lexical], dense]
+    if extra_dense:
+        lists.append(list(extra_dense))
+    tail = rrf(lists, limit)
     if not dense:
         return tail
     first = []
@@ -241,7 +245,8 @@ class ServerLog:
     """Private archive, lexical-only until enable_dense or start_embedder is called."""
 
     def __init__(
-        self, path=None, *, checkout=None, guild_id=None, model=None, embedder=None, max_length=None
+        self, path=None, *, checkout=None, guild_id=None, model=None, embedder=None,
+        max_length=None, hybrid_model=None, hybrid_embedder=None, hybrid_onnx_dir=None
     ):
         self.path = (
             Path(path)
@@ -258,6 +263,19 @@ class ServerLog:
         self.static_model = os.environ.get("SERVER_LOG_STATIC_MODEL") or None
         # Optional local ONNX directory for models fastembed cannot load.
         self.embedding_onnx_dir = os.environ.get("SERVER_LOG_EMBEDDING_ONNX_DIR") or None
+        # Optional hybrid retrieval: a second dense path (a fine-tuned
+        # model) whose stored vectors are fused with the primary path.
+        # Active only when both the model tag and a query-encoder source
+        # (ONNX directory or an injected embedder) are configured; the
+        # DenseIndex enforces that and falls back to two-path fusion.
+        self.hybrid_model = (
+            hybrid_model or os.environ.get("SERVER_LOG_HYBRID_MODEL") or None
+        )
+        self.hybrid_onnx_dir = (
+            hybrid_onnx_dir or os.environ.get("SERVER_LOG_HYBRID_ONNX_DIR") or None
+        )
+        self._hybrid_embedder = hybrid_embedder
+        self._hybrid_dense = None
         self.max_length = int(
             max_length if max_length is not None else os.getenv("SERVER_LOG_MAX_LENGTH", "128")
         )
@@ -801,9 +819,27 @@ class ServerLog:
             self._lexical_reason = None
             logger.info("Server log search mode=dense partial=%s coverage=%s",
                         getattr(dense, "partial", False), getattr(dense, "coverage", None))
+            extra_dense = None
+            if self.hybrid_model and self._dense is not None:
+                try:
+                    aux_search = (
+                        self._dense.search_aux_snapshot if snapshot_only
+                        else self._dense.search_aux
+                    )
+                    extra_dense = aux_search(
+                        db, query, channel_ids, where, args, pool, author_ids=author,
+                        channel=channel, after=after, before=before,
+                    )
+                except Exception:
+                    logger.warning(
+                        "Hybrid dense search unavailable; using two-path fusion",
+                        exc_info=True,
+                    )
+                    extra_dense = None
             ids = _fusion(query, lexical, dense, pool,
                           partial=getattr(dense, "partial", False),
-                          dense_coverage=getattr(dense, "coverage", None))[:limit]
+                          dense_coverage=getattr(dense, "coverage", None),
+                          extra_dense=extra_dense)[:limit]
             if not ids:
                 return []
             # Reapply scope on the final materialization as well as both rankers.
@@ -943,6 +979,44 @@ class ServerLog:
 
     def embed_pending(self, *, batch_size=32, progress=None):
         return self._embed_batches(batch_size, progress, Event())
+
+    def embed_pending_hybrid(self, *, batch_size=32, progress=None):
+        """Embed pending messages under the hybrid model tag, if configured.
+
+        Keeps the hybrid path's coverage from decaying as new messages
+        arrive. Returns 0 when hybrid retrieval is not configured.
+        """
+        if batch_size < 1:
+            raise ValueError("batch_size must be positive")
+        if not self.hybrid_model or not (self.hybrid_onnx_dir or self._hybrid_embedder):
+            return 0
+        with self._embedding_lock:
+            try:
+                return self._hybrid_index().embed_pending(batch_size, progress, Event())
+            except Exception:
+                # The hybrid path is best-effort: its failure must never
+                # take down primary embedding or search.
+                logger.warning("Hybrid embedding pass unavailable", exc_info=True)
+                return 0
+
+    def _hybrid_index(self):
+        if self._hybrid_dense is None:
+            from types import SimpleNamespace
+
+            from nezubot_discrod.server_log_dense import DenseIndex
+
+            shim = SimpleNamespace(
+                connect=self.connect,
+                model=self.hybrid_model,
+                static_model=None,
+                max_length=self.max_length,
+                embedding_onnx_dir=self.hybrid_onnx_dir,
+                hybrid_model=None,
+                hybrid_onnx_dir=None,
+                _hybrid_embedder=None,
+            )
+            self._hybrid_dense = DenseIndex(shim, self._hybrid_embedder)
+        return self._hybrid_dense
 
     def enable_dense(self):
         """Load the query backend synchronously without embedding pending messages."""
