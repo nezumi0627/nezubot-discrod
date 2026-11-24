@@ -99,12 +99,26 @@ async def is_call(message, user):
     reference = getattr(message, "reference", None)
     if reference and reference.message_id:
         target = getattr(reference, "resolved", None)
-        if target is None:
+        author_id = getattr(getattr(target, "author", None), "id", None)
+        if author_id is None:
+            # The gateway gave no author for the reply target: the
+            # reference is unresolved, or it resolved to a
+            # DeletedReferencedMessage, which carries no author even
+            # when the target message still exists (Discord sends
+            # referenced_message=null for targets it cannot attach,
+            # not only for actual deletions). Resolve it with one
+            # fetch before deciding; any failure stays a non-call, so
+            # the trigger fails closed.
             try:
                 target = await message.channel.fetch_message(reference.message_id)
             except discord.HTTPException:
                 target = None
-        if getattr(getattr(target, "author", None), "id", None) == user.id:
+            author_id = getattr(getattr(target, "author", None), "id", None)
+        if author_id == user.id:
+            logger.info(
+                "Reply-to-bot call in channel %s",
+                getattr(getattr(message, "channel", None), "id", None),
+            )
             return True
     return False
 
