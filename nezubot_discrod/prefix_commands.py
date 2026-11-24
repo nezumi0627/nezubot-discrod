@@ -2,8 +2,11 @@
 
 A message starting with n! (any case, no mention needed) is a command,
 not conversation: n!help shows usage, n!del retracts one of the bot's
-own messages, n!status shows the learning stats. Anything else that
-merely contains n! is left to the normal mention/reply flow.
+own messages, n!status shows the learning stats. Informational output
+(n!help / n!status / n!limit) goes only to the invoker, by DM; it is
+never posted publicly, and a failed DM never falls back to the channel.
+Anything else that merely contains n! is left to the normal
+mention/reply flow.
 """
 
 import asyncio
@@ -24,6 +27,8 @@ STATUS_CACHE_SECONDS = 60.0
 LIMIT_CACHE_SECONDS = 45.0
 LIMIT_FETCH_TIMEOUT = 45.0
 ANSWER_AUTHOR_LIMIT = 1000
+DM_DELIVERED_REACTION = "📩"
+DM_FAILED_REACTION = "⚠️"
 
 HELP_TEXT = (
     "**nezubot-discrodの使い方**\n"
@@ -34,6 +39,8 @@ HELP_TEXT = (
     "（質問した本人かサーバーオーナーだけ）\n"
     "- `n!status` — 学習状況（学習したメッセージ数・人数・チャンネル・学習率など）を表示\n"
     "- `n!limit` — ChatGPT/Codex の利用枠（5時間枠・週間枠の残り %）を表示\n"
+    "（help / status / limit の結果は、使った本人への DM で送るよ。"
+    "チャンネルには出ない）\n"
     "\n"
     "**話しかけ方**\n"
     "- @nezubot-discrod へのメンションか、nezubot-discrodの発言へのリプライで質問すると、"
@@ -69,13 +76,48 @@ def record_answer_authors(bot, sent_messages, author_id):
         store.popitem(last=False)
 
 
+async def _react_quietly(message, emoji):
+    try:
+        await message.add_reaction(emoji)
+    except discord.HTTPException:
+        logger.warning(
+            "n! command: %s reaction failed on message %s",
+            emoji,
+            getattr(message, "id", None),
+            exc_info=True,
+        )
+
+
+async def _send_dm(message, *, content=None, embed=None):
+    """Deliver command output to the invoker only, by DM.
+
+    Prefix commands have no ephemeral mode, so informational output
+    goes to the author's DMs instead of the channel. A failed DM (the
+    author blocks DMs, …) never falls back to a public post: it is
+    logged and signalled with a reaction on the invoking message.
+    Returns True when the DM was delivered.
+    """
+    try:
+        await message.author.send(content=content, embed=embed)
+    except discord.HTTPException:
+        logger.warning(
+            "n! command: DM to author %s failed; not posting publicly",
+            getattr(message.author, "id", None),
+            exc_info=True,
+        )
+        await _react_quietly(message, DM_FAILED_REACTION)
+        return False
+    await _react_quietly(message, DM_DELIVERED_REACTION)
+    return True
+
+
 async def handle_prefix_command(bot, message):
     """Run the n! command in message. True when the message was a command."""
     command = parse_prefix_command(getattr(message, "content", "") or "")
     if command is None:
         return False
     if command == "help":
-        await message.channel.send(HELP_TEXT)
+        await _send_dm(message, content=HELP_TEXT)
     elif command == "del":
         await _delete_referenced(bot, message)
     elif command == "status":
@@ -155,7 +197,7 @@ async def _send_status(bot, message):
         stats = await _cached_status(bot)
     except Exception:
         logger.exception("n!status: stat collection failed")
-        await message.channel.send("ステータスの集計に失敗した。時間をおいて再試行してね。")
+        await _send_dm(message, content="ステータスの集計に失敗した。時間をおいて再試行してね。")
         return
     started_at = getattr(bot, "started_at", None)
     uptime = time.monotonic() - started_at if started_at is not None else None
@@ -165,7 +207,7 @@ async def _send_status(bot, message):
         version=latest_version(),
         uptime_seconds=uptime,
     )
-    await message.channel.send(embed=embed)
+    await _send_dm(message, embed=embed)
 
 
 async def _cached_limits(bot):
@@ -189,6 +231,6 @@ async def _send_limit(bot, message):
         usage = await _cached_limits(bot)
     except Exception:
         logger.warning("n!limit: usage fetch failed", exc_info=True)
-        await message.channel.send("利用枠を取得できませんでした。時間をおいて再試行してね。")
+        await _send_dm(message, content="利用枠を取得できませんでした。時間をおいて再試行してね。")
         return
-    await message.channel.send(embed=build_limit_embed(usage))
+    await _send_dm(message, embed=build_limit_embed(usage))

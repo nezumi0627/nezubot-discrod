@@ -19,6 +19,19 @@ class UpdateEntry:
 
 UPDATES: tuple[UpdateEntry, ...] = (
     UpdateEntry(
+        "1.9.2",
+        "2026-11-24",
+        (
+            "n!help / n!status / n!limit の出力を、チャンネルへの公開投稿から"
+            "コマンドを使った本人への DM 送信に変更した。届いた合図に 📩、"
+            "DM が送れない場合は ⚠️ のリアクションだけを付け、"
+            "公開投稿には戻さない",
+            "スラッシュコマンドを監査し、/ping の応答も ephemeral"
+            "（自分だけ表示）に揃えた。他のコマンド"
+            "（/search /wiki /prompt /reset /improve）は元から ephemeral",
+        ),
+    ),
+    UpdateEntry(
         "1.9.1",
         "2026-11-24",
         (
