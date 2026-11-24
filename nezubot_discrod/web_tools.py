@@ -14,6 +14,9 @@ from nezubot_discrod.persona import PERSONA
 
 MAX_BYTES = 2 * 1024 * 1024
 MAX_TEXT = 8000
+# DuckDuckGo through an egress proxy occasionally answers very slowly
+# (25s+ observed); the search call gets a larger budget than plain fetches.
+SEARCH_TIMEOUT = 30
 USER_AGENT = f"{PERSONA.bot_name}/1.0" + (f" ({PERSONA.repo_url})" if PERSONA.repo_url else "")
 SEARCH_HEADERS = {
     "User-Agent": "Mozilla/5.0", "Accept": "text/html", "Accept-Language": "ja,en;q=0.8",
@@ -123,6 +126,89 @@ def vet_url(url):
     return canonical
 
 
+def _no_proxy_match(host, raw):
+    for entry in raw.split(","):
+        entry = entry.strip().lower()
+        if not entry:
+            continue
+        if entry == "*":
+            return True
+        if ":" in entry and not entry.startswith("["):
+            name, _, port = entry.rpartition(":")
+            if port.isdigit():
+                entry = name
+        entry = entry.lstrip(".")
+        if host == entry or host.endswith("." + entry):
+            return True
+    return False
+
+
+def proxy_for_url(url):
+    """Egress proxy for *url* from the standard *_PROXY environment.
+
+    Returns None when no proxy is configured for the URL's scheme or the
+    host is listed in NO_PROXY. The value comes from the operator's
+    environment and is only handed to aiohttp as the proxy argument;
+    it is never logged.
+    """
+    parsed = urlsplit(url)
+    scheme = parsed.scheme.lower()
+    if scheme not in {"http", "https"}:
+        return None
+    host = (parsed.hostname or "").lower()
+    if host:
+        for name in ("no_proxy", "NO_PROXY"):
+            raw = os.environ.get(name)
+            if raw and _no_proxy_match(host, raw):
+                return None
+    for name in (f"{scheme}_proxy", f"{scheme.upper()}_PROXY", "all_proxy", "ALL_PROXY"):
+        raw = os.environ.get(name, "").strip()
+        if not raw:
+            continue
+        try:
+            parts = urlsplit(raw)
+            valid = parts.scheme in {"http", "https"} and bool(parts.hostname)
+        except ValueError:
+            valid = False
+        if valid:
+            return raw
+    return None
+
+
+_PROXY_FORBIDDEN_SUFFIXES = (
+    ".local",
+    ".internal",
+    ".lan",
+    ".home",
+    ".corp",
+    ".intranet",
+    ".localdomain",
+)
+
+
+def vet_proxy_url(url):
+    """Extra target vetting applied only when fetching through a proxy.
+
+    The proxy resolves the hostname, so the resolved-IP pinning of the
+    direct path cannot run. vet_url has already rejected credentials,
+    localhost and non-public literal IPs; this rejects the remaining
+    names that only make sense inside a local network: bare single-label
+    hosts, private-use suffixes and inet_aton-style numeric forms that a
+    resolver could map onto loopback or private addresses.
+    """
+    host = (urlsplit(url).hostname or "").rstrip(".").lower()
+    try:
+        ipaddress.ip_address(host)
+    except ValueError:
+        labels = host.split(".")
+        if (
+            "." not in host
+            or host.endswith(_PROXY_FORBIDDEN_SUFFIXES)
+            or all(re.fullmatch(r"0x[0-9a-f]+|[0-9]+", label) for label in labels)
+        ):
+            raise WebError("Non-public hostnames are forbidden") from None
+
+
 class PublicResolver(aiohttp.abc.AbstractResolver):
     async def resolve(self, host, port=0, family=socket.AF_INET):
         addresses = await asyncio.get_running_loop().getaddrinfo(
@@ -150,12 +236,19 @@ class PublicResolver(aiohttp.abc.AbstractResolver):
         pass
 
 
-async def fetch_text(url, *, data=None, headers=None):
+async def fetch_text(url, *, data=None, headers=None, timeout=10):
+    proxy = proxy_for_url(url)
     try:
-        async with asyncio.timeout(10):
-            connector = aiohttp.TCPConnector(
-                resolver=PublicResolver(), use_dns_cache=False, force_close=True
-            )
+        async with asyncio.timeout(timeout):
+            if proxy is None:
+                connector = aiohttp.TCPConnector(
+                    resolver=PublicResolver(), use_dns_cache=False, force_close=True
+                )
+            else:
+                # Through a proxy the target hostname is resolved by the
+                # proxy itself, so the pinning resolver must not run; the
+                # default resolver only ever resolves the proxy's own host.
+                connector = aiohttp.TCPConnector(use_dns_cache=False, force_close=True)
             async with aiohttp.ClientSession(
                 connector=connector,
                 trust_env=False,
@@ -163,19 +256,29 @@ async def fetch_text(url, *, data=None, headers=None):
                 cookie_jar=aiohttp.DummyCookieJar(),
                 headers={"User-Agent": USER_AGENT, "Accept-Encoding": "identity"},
             ) as session:
-                return await _fetch_redirects(session, url, data=data, headers=headers)
+                return await _fetch_redirects(
+                    session, url, data=data, headers=headers, proxy=proxy
+                )
     except (aiohttp.ClientError, OSError, TimeoutError, UnicodeError) as error:
         raise WebError(f"Web fetch failed ({type(error).__name__})") from error
 
 
-async def _fetch_redirects(session, url, *, data=None, headers=None):
+async def _fetch_redirects(session, url, *, data=None, headers=None, proxy=None):
     for hop in range(6):
         url = vet_url(url)
+        extra = {}
+        if proxy is not None:
+            vet_proxy_url(url)
+            # Stay on a proxy for every hop: dropping to a direct
+            # connection mid-chain would resolve the target locally and
+            # skip the proxy-mode vetting above.
+            extra["proxy"] = proxy_for_url(url) or proxy
         if data is not None:
-            request = session.post(url, data=data, headers=headers, allow_redirects=False)
+            request = session.post(url, data=data, headers=headers, allow_redirects=False,
+                                   **extra)
         else:
             request = session.get(url, **({"headers": headers} if headers else {}),
-                                  allow_redirects=False)
+                                  allow_redirects=False, **extra)
         async with request as response:
             if response.status in {301, 302, 303, 307, 308}:
                 location = response.headers.get("Location")
@@ -405,7 +508,7 @@ class WebTools:
         if name == "web_search":
             _, _, html = await fetch_text(
                 "https://html.duckduckgo.com/html/", data={"q": args["query"]},
-                headers=SEARCH_HEADERS,
+                headers=SEARCH_HEADERS, timeout=SEARCH_TIMEOUT,
             )
             hits = parse_ddg(html, args.get("limit", 5))
             return {
