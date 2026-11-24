@@ -72,7 +72,7 @@ def make_message(*, content="n!del", author_id=100, reference=None, guild_owner=
     return SimpleNamespace(
         id=555,
         content=content,
-        author=SimpleNamespace(id=author_id, bot=False),
+        author=SimpleNamespace(id=author_id, bot=False, send=AsyncMock()),
         channel=channel,
         reference=reference,
         guild=SimpleNamespace(owner_id=guild_owner) if guild_owner is not None else None,
@@ -96,11 +96,23 @@ def http_error(status=403):
     )
 
 
-def test_help_sends_usage():
+def test_help_sends_usage_by_dm_only():
     message = make_message(content="n!help")
     assert asyncio.run(handle_prefix_command(make_bot(), message)) is True
-    message.channel.send.assert_awaited_once_with(HELP_TEXT)
+    message.author.send.assert_awaited_once_with(content=HELP_TEXT, embed=None)
+    message.channel.send.assert_not_awaited()
+    message.add_reaction.assert_awaited_once_with("📩")
     assert "n!del" in HELP_TEXT and "n!status" in HELP_TEXT
+
+
+def test_help_dm_failure_never_posts_publicly(caplog):
+    message = make_message(content="n!help")
+    message.author.send = AsyncMock(side_effect=http_error(403))
+    with caplog.at_level(logging.WARNING, logger="nezubot_discrod.prefix_commands"):
+        assert asyncio.run(handle_prefix_command(make_bot(), message)) is True
+    message.channel.send.assert_not_awaited()
+    message.add_reaction.assert_awaited_once_with("⚠️")
+    assert any("not posting publicly" in record.message for record in caplog.records)
 
 
 def test_non_command_is_not_handled():
@@ -294,16 +306,24 @@ def test_status_command_uses_cache(status_paths):
     bot = make_bot(server_log=server_log)
     message = make_message(content="n!status")
     asyncio.run(handle_prefix_command(bot, message))
-    first = message.channel.send.call_args.kwargs["embed"]
+    first = message.author.send.call_args.kwargs["embed"]
     assert "50.00%" in {
         field.name: field.value for field in first.fields
     }["🎓 学習率（埋め込みカバー率）"]
+    message.channel.send.assert_not_awaited()
     db_path.unlink()
     server_wiki_path.unlink()
-    message.channel.send.reset_mock()
+    message.author.send.reset_mock()
     asyncio.run(handle_prefix_command(bot, message))
-    second = message.channel.send.call_args.kwargs["embed"]
+    second = message.author.send.call_args.kwargs["embed"]
     assert second.fields[0].value == first.fields[0].value
+
+
+def test_status_failure_notice_goes_to_dm_only():
+    message = make_message(content="n!status")
+    asyncio.run(handle_prefix_command(make_bot(server_log=None), message))
+    assert "集計に失敗" in message.author.send.call_args.kwargs["content"]
+    message.channel.send.assert_not_awaited()
 
 
 def test_format_helpers():
@@ -329,4 +349,5 @@ def test_on_message_routes_prefix_command_without_mention():
     message.guild = SimpleNamespace(id=123, owner_id=GUILD_OWNER_ID)
     message.mentions = []
     asyncio.run(Bot.on_message(bot, message))
-    message.channel.send.assert_awaited_once_with(HELP_TEXT)
+    message.author.send.assert_awaited_once_with(content=HELP_TEXT, embed=None)
+    message.channel.send.assert_not_awaited()

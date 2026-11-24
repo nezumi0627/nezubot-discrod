@@ -12,4 +12,4 @@ def test_ping_registers_and_replies_pong():
     assert command["name"] == "ping"
     interaction = SimpleNamespace(response=SimpleNamespace(send_message=AsyncMock()))
     asyncio.run(command["callback"](interaction))
-    interaction.response.send_message.assert_awaited_once_with("pong")
+    interaction.response.send_message.assert_awaited_once_with("pong", ephemeral=True)

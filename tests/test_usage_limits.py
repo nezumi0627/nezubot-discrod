@@ -2,6 +2,8 @@ import asyncio
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
+import discord
+
 from nezubot_discrod.prefix_commands import HELP_TEXT, handle_prefix_command
 from nezubot_discrod.usage_limits import build_limit_embed, format_reset, parse_rate_limits
 
@@ -103,7 +105,7 @@ def make_message():
     return SimpleNamespace(
         id=555,
         content="n!limit",
-        author=SimpleNamespace(id=100, bot=False),
+        author=SimpleNamespace(id=100, bot=False, send=AsyncMock()),
         channel=SimpleNamespace(send=AsyncMock()),
         reference=None,
         guild=SimpleNamespace(owner_id=999),
@@ -116,8 +118,9 @@ def test_limit_command_sends_embed_and_caches():
     bot = make_bot(fetch)
     message = make_message()
     asyncio.run(handle_prefix_command(bot, message))
-    embed = message.channel.send.call_args.kwargs["embed"]
+    embed = message.author.send.call_args.kwargs["embed"]
     assert "残り 77%" in embed.fields[0].value
+    message.channel.send.assert_not_awaited()
     asyncio.run(handle_prefix_command(bot, message))
     fetch.assert_awaited_once()
 
@@ -126,9 +129,8 @@ def test_limit_command_failure_is_honest():
     bot = make_bot(AsyncMock(side_effect=RuntimeError("app-server down")))
     message = make_message()
     asyncio.run(handle_prefix_command(bot, message))
-    args, kwargs = message.channel.send.call_args
-    assert "取得できませんでした" in args[0]
-    assert "embed" not in kwargs
+    assert "取得できませんでした" in message.author.send.call_args.kwargs["content"]
+    message.channel.send.assert_not_awaited()
 
 
 def test_limit_command_without_codex_client_is_honest():
@@ -136,7 +138,21 @@ def test_limit_command_without_codex_client_is_honest():
     bot.ai_client = SimpleNamespace()
     message = make_message()
     asyncio.run(handle_prefix_command(bot, message))
-    assert "取得できませんでした" in message.channel.send.call_args.args[0]
+    assert "取得できませんでした" in message.author.send.call_args.kwargs["content"]
+    message.channel.send.assert_not_awaited()
+
+
+def test_limit_dm_failure_never_posts_publicly():
+    bot = make_bot(AsyncMock(return_value=RESPONSE))
+    message = make_message()
+    message.author.send = AsyncMock(
+        side_effect=discord.HTTPException(
+            SimpleNamespace(status=403, reason="error"), "request failed"
+        )
+    )
+    asyncio.run(handle_prefix_command(bot, message))
+    message.channel.send.assert_not_awaited()
+    message.add_reaction.assert_awaited_once_with("⚠️")
 
 
 def test_help_lists_limit():
