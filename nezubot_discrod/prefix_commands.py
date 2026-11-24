@@ -1,53 +1,25 @@
 """The n! prefix commands, routed before normal conversation handling.
 
 A message starting with n! (any case, no mention needed) is a command,
-not conversation: n!help shows usage, n!del retracts one of the bot's
-own messages, n!status shows the learning stats. Informational output
-(n!help / n!status / n!limit) goes only to the invoker, by DM; it is
-never posted publicly, and a failed DM never falls back to the channel.
+not conversation. Only n!del remains: replying to one of the bot's own
+messages with n!del retracts it. The informational commands moved to
+ephemeral slash commands (/help, /status, /limit in bot.py); the old
+n!help / n!status / n!limit spellings are still recognised here so a
+message starting with one is swallowed silently instead of falling
+into the conversation flow — no DM, no public post, no reaction.
 Anything else that merely contains n! is left to the normal
 mention/reply flow.
 """
 
-import asyncio
 import logging
 import re
-import time
 
 import discord
-
-from nezubot_discrod.status import build_status_embed, collect_status
-from nezubot_discrod.updates import latest_version
-from nezubot_discrod.usage_limits import build_limit_embed, parse_rate_limits
 
 logger = logging.getLogger(__name__)
 
 _PREFIX = re.compile(r"^n!(help|del|status|limit)\b", re.IGNORECASE)
-STATUS_CACHE_SECONDS = 60.0
-LIMIT_CACHE_SECONDS = 45.0
-LIMIT_FETCH_TIMEOUT = 45.0
 ANSWER_AUTHOR_LIMIT = 1000
-DM_DELIVERED_REACTION = "📩"
-DM_FAILED_REACTION = "⚠️"
-
-HELP_TEXT = (
-    "**nezubot-discrodの使い方**\n"
-    "\n"
-    "**n! コマンド（メンション不要・メッセージの先頭に付ける）**\n"
-    "- `n!help` — この使い方を表示\n"
-    "- `n!del` — nezubot-discrodの発言に**リプライ**して送ると、その発言を取り消す"
-    "（質問した本人かサーバーオーナーだけ）\n"
-    "- `n!status` — 学習状況（学習したメッセージ数・人数・チャンネル・学習率など）を表示\n"
-    "- `n!limit` — ChatGPT/Codex の利用枠（5時間枠・週間枠の残り %）を表示\n"
-    "（help / status / limit の結果は、使った本人への DM で送るよ。"
-    "チャンネルには出ない）\n"
-    "\n"
-    "**話しかけ方**\n"
-    "- @nezubot-discrod へのメンションか、nezubot-discrodの発言へのリプライで質問すると、"
-    "サーバーの過去ログを根拠に答えるよ\n"
-    "- 長い回答は、チャンネルには要約だけ出して全文をスレッドに分けるよ\n"
-    "- 会話履歴のリセットは /reset"
-)
 
 
 def parse_prefix_command(content):
@@ -76,54 +48,22 @@ def record_answer_authors(bot, sent_messages, author_id):
         store.popitem(last=False)
 
 
-async def _react_quietly(message, emoji):
-    try:
-        await message.add_reaction(emoji)
-    except discord.HTTPException:
-        logger.warning(
-            "n! command: %s reaction failed on message %s",
-            emoji,
-            getattr(message, "id", None),
-            exc_info=True,
-        )
-
-
-async def _send_dm(message, *, content=None, embed=None):
-    """Deliver command output to the invoker only, by DM.
-
-    Prefix commands have no ephemeral mode, so informational output
-    goes to the author's DMs instead of the channel. A failed DM (the
-    author blocks DMs, …) never falls back to a public post: it is
-    logged and signalled with a reaction on the invoking message.
-    Returns True when the DM was delivered.
-    """
-    try:
-        await message.author.send(content=content, embed=embed)
-    except discord.HTTPException:
-        logger.warning(
-            "n! command: DM to author %s failed; not posting publicly",
-            getattr(message.author, "id", None),
-            exc_info=True,
-        )
-        await _react_quietly(message, DM_FAILED_REACTION)
-        return False
-    await _react_quietly(message, DM_DELIVERED_REACTION)
-    return True
-
-
 async def handle_prefix_command(bot, message):
     """Run the n! command in message. True when the message was a command."""
     command = parse_prefix_command(getattr(message, "content", "") or "")
     if command is None:
         return False
-    if command == "help":
-        await _send_dm(message, content=HELP_TEXT)
-    elif command == "del":
+    if command == "del":
         await _delete_referenced(bot, message)
-    elif command == "status":
-        await _send_status(bot, message)
-    elif command == "limit":
-        await _send_limit(bot, message)
+    else:
+        # Retired informational commands (help / status / limit): they
+        # live on as ephemeral slash commands now. Swallow the message
+        # silently — never DM, never post, never react.
+        logger.info(
+            "n!%s was retired in favour of slash commands; ignoring message %s",
+            command,
+            getattr(message, "id", None),
+        )
     return True
 
 
@@ -173,64 +113,3 @@ async def _delete_referenced(bot, message):
         await message.add_reaction("✅")
     except discord.HTTPException:
         logger.warning("n!del: ✅ reaction failed on message %s", message.id, exc_info=True)
-
-
-async def _cached_status(bot):
-    cache = getattr(bot, "_status_cache", None)
-    now = time.monotonic()
-    if cache is not None and now - cache[0] < STATUS_CACHE_SECONDS:
-        return cache[1]
-    server_log = bot.server_log
-    stats = await asyncio.to_thread(
-        collect_status,
-        server_log.path,
-        teacher_model=server_log.model,
-        static_model=server_log.static_model,
-        server_wiki_path=server_log.path.with_name("server_wiki.db"),
-    )
-    bot._status_cache = (now, stats)
-    return stats
-
-
-async def _send_status(bot, message):
-    try:
-        stats = await _cached_status(bot)
-    except Exception:
-        logger.exception("n!status: stat collection failed")
-        await _send_dm(message, content="ステータスの集計に失敗した。時間をおいて再試行してね。")
-        return
-    started_at = getattr(bot, "started_at", None)
-    uptime = time.monotonic() - started_at if started_at is not None else None
-    embed = build_status_embed(
-        stats,
-        model=bot.settings.model,
-        version=latest_version(),
-        uptime_seconds=uptime,
-    )
-    await _send_dm(message, embed=embed)
-
-
-async def _cached_limits(bot):
-    cache = getattr(bot, "_limit_cache", None)
-    now = time.monotonic()
-    if cache is not None and now - cache[0] < LIMIT_CACHE_SECONDS:
-        return cache[1]
-    fetch = getattr(bot.ai_client, "rate_limits", None)
-    if fetch is None:
-        raise RuntimeError("the AI client cannot read rate limits")
-    raw = await asyncio.wait_for(fetch(), timeout=LIMIT_FETCH_TIMEOUT)
-    usage = parse_rate_limits(raw)
-    if usage is None:
-        raise ValueError("rate limit response had no usable windows")
-    bot._limit_cache = (now, usage)
-    return usage
-
-
-async def _send_limit(bot, message):
-    try:
-        usage = await _cached_limits(bot)
-    except Exception:
-        logger.warning("n!limit: usage fetch failed", exc_info=True)
-        await _send_dm(message, content="利用枠を取得できませんでした。時間をおいて再試行してね。")
-        return
-    await _send_dm(message, embed=build_limit_embed(usage))

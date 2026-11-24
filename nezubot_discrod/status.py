@@ -1,9 +1,9 @@
-"""Read-only learning-status aggregation behind the n!status command.
+"""Read-only learning-status aggregation behind the /status command.
 
 Every query runs against the live archive through a read-only SQLite
 connection (the bot keeps writing to the same WAL database) and each
 one is an indexed count that returns in about a second; callers cache
-the result (see prefix_commands) so repeated n!status calls stay cheap.
+the result (see bot.cached_status) so repeated /status calls stay cheap.
 
 "Eligible" mirrors the dense embedder's queue filter in
 server_log_dense.embed_pending: not deleted or tombstoned, human
@@ -125,7 +125,7 @@ def format_size(num_bytes):
 
 
 def build_status_embed(stats, *, model, version, uptime_seconds=None):
-    """Render the aggregated stats as the n!status embed."""
+    """Render the aggregated stats as the /status embed."""
     import discord
 
     embed = discord.Embed(

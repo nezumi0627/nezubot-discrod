@@ -1,4 +1,4 @@
-"""Parsing and rendering for the n!limit subscription-usage command.
+"""Parsing and rendering for the /limit subscription-usage command.
 
 The raw payload is the Codex app-server's GetAccountRateLimitsResponse
 (account/rateLimits/read): a snapshot whose primary window is the
@@ -84,7 +84,7 @@ def format_reset(resets_at):
 
 
 def build_limit_embed(usage):
-    """Render parsed usage windows as the n!limit embed."""
+    """Render parsed usage windows as the /limit embed."""
     import discord
 
     description = "ChatGPT / Codex サブスクリプションの利用枠"

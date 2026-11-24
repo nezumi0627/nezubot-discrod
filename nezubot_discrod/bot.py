@@ -53,6 +53,9 @@ from nezubot_discrod.server_log_discord import (
     is_call,
 )
 from nezubot_discrod.server_wiki import ServerWiki, format_pages
+from nezubot_discrod.status import build_status_embed, collect_status
+from nezubot_discrod.updates import latest_version
+from nezubot_discrod.usage_limits import build_limit_embed, parse_rate_limits
 from nezubot_discrod.web_tools import WebTools
 
 logger = logging.getLogger(__name__)
@@ -132,6 +135,113 @@ async def show_prompt(interaction, settings):
     await interaction.response.send_message(parts[0], ephemeral=True)
     for part in parts[1:]:
         await interaction.followup.send(part, ephemeral=True)
+
+
+STATUS_CACHE_SECONDS = 60.0
+LIMIT_CACHE_SECONDS = 45.0
+LIMIT_FETCH_TIMEOUT = 45.0
+
+HELP_TEXT = (
+    "**nezubot-discrodの使い方**\n"
+    "\n"
+    "**スラッシュコマンド（結果は使った本人だけに見える）**\n"
+    "- `/help` — この使い方を表示\n"
+    "- `/status` — 学習状況（学習したメッセージ数・人数・チャンネル・学習率など）を表示\n"
+    "- `/limit` — ChatGPT/Codex の利用枠（5時間枠・週間枠の残り %）を表示\n"
+    "- `/reset` — このチャンネルの会話履歴をリセット\n"
+    "\n"
+    "**n! コマンド（メンション不要・メッセージの先頭に付ける）**\n"
+    "- `n!del` — nezubot-discrodの発言に**リプライ**して送ると、その発言を取り消す"
+    "（質問した本人かサーバーオーナーだけ）\n"
+    "\n"
+    "**話しかけ方**\n"
+    "- @nezubot-discrod へのメンションか、nezubot-discrodの発言へのリプライで質問すると、"
+    "サーバーの過去ログを根拠に答えるよ\n"
+    "- 長い回答は、チャンネルには要約だけ出して全文をスレッドに分けるよ"
+)
+
+
+async def show_help(interaction, bot):
+    if interaction.guild_id != bot.settings.guild_id:
+        await interaction.response.send_message("指定サーバーでのみ利用できます。", ephemeral=True)
+        return
+    parts = split_message(HELP_TEXT)
+    await interaction.response.send_message(parts[0], ephemeral=True)
+    for part in parts[1:]:
+        await interaction.followup.send(part, ephemeral=True)
+
+
+async def cached_status(bot):
+    cache = getattr(bot, "_status_cache", None)
+    now = time.monotonic()
+    if cache is not None and now - cache[0] < STATUS_CACHE_SECONDS:
+        return cache[1]
+    server_log = bot.server_log
+    stats = await asyncio.to_thread(
+        collect_status,
+        server_log.path,
+        teacher_model=server_log.model,
+        static_model=server_log.static_model,
+        server_wiki_path=server_log.path.with_name("server_wiki.db"),
+    )
+    bot._status_cache = (now, stats)
+    return stats
+
+
+async def show_status(interaction, bot):
+    if interaction.guild_id != bot.settings.guild_id:
+        await interaction.response.send_message("指定サーバーでのみ利用できます。", ephemeral=True)
+        return
+    await interaction.response.defer(ephemeral=True)
+    try:
+        stats = await cached_status(bot)
+    except Exception:
+        logger.exception("/status: stat collection failed")
+        await interaction.followup.send(
+            "ステータスの集計に失敗した。時間をおいて再試行してね。", ephemeral=True
+        )
+        return
+    started_at = getattr(bot, "started_at", None)
+    uptime = time.monotonic() - started_at if started_at is not None else None
+    embed = build_status_embed(
+        stats,
+        model=bot.settings.model,
+        version=latest_version(),
+        uptime_seconds=uptime,
+    )
+    await interaction.followup.send(embed=embed, ephemeral=True)
+
+
+async def cached_limits(bot):
+    cache = getattr(bot, "_limit_cache", None)
+    now = time.monotonic()
+    if cache is not None and now - cache[0] < LIMIT_CACHE_SECONDS:
+        return cache[1]
+    fetch = getattr(bot.ai_client, "rate_limits", None)
+    if fetch is None:
+        raise RuntimeError("the AI client cannot read rate limits")
+    raw = await asyncio.wait_for(fetch(), timeout=LIMIT_FETCH_TIMEOUT)
+    usage = parse_rate_limits(raw)
+    if usage is None:
+        raise ValueError("rate limit response had no usable windows")
+    bot._limit_cache = (now, usage)
+    return usage
+
+
+async def show_limit(interaction, bot):
+    if interaction.guild_id != bot.settings.guild_id:
+        await interaction.response.send_message("指定サーバーでのみ利用できます。", ephemeral=True)
+        return
+    await interaction.response.defer(ephemeral=True)
+    try:
+        usage = await cached_limits(bot)
+    except Exception:
+        logger.warning("/limit: usage fetch failed", exc_info=True)
+        await interaction.followup.send(
+            "利用枠を取得できませんでした。時間をおいて再試行してね。", ephemeral=True
+        )
+        return
+    await interaction.followup.send(embed=build_limit_embed(usage), ephemeral=True)
 
 
 async def deliver_answer(channel, question, answer, parts):
@@ -242,6 +352,18 @@ class Bot(discord.Client):
             self.assistant.reset(interaction.channel_id)
             await interaction.response.send_message("会話履歴をリセットしました。", ephemeral=True)
 
+        @self.tree.command(name="help", description="使い方を表示（自分だけ表示）")
+        async def help_command(interaction: discord.Interaction):
+            await show_help(interaction, self)
+
+        @self.tree.command(name="status", description="学習状況を表示（自分だけ表示）")
+        async def status_command(interaction: discord.Interaction):
+            await show_status(interaction, self)
+
+        @self.tree.command(name="limit", description="ChatGPT/Codex の利用枠を表示（自分だけ表示）")
+        async def limit_command(interaction: discord.Interaction):
+            await show_limit(interaction, self)
+
     async def setup_hook(self):
         if getattr(self, "server_log", None) is not None:
             try:
@@ -326,7 +448,7 @@ class Bot(discord.Client):
         ):
             return
         # n! prefix commands fire without a mention, ahead of the call
-        # check and the busy gate, so n!del/n!status stay reachable
+        # check and the busy gate, so n!del stays reachable
         # while an answer is being generated.
         if parse_prefix_command(message.content or "") is not None:
             await handle_prefix_command(self, message)
