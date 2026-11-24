@@ -116,10 +116,19 @@ class Assistant:
         self.history = OrderedDict()
 
     def reset(self, channel_id: int):
-        self.history.pop(channel_id, None)
-        for key in list(self.history):
-            if isinstance(key, tuple) and key[0] == channel_id:
-                self.history.pop(key)
+        popped = [
+            key for key in self.history
+            if key == channel_id or (isinstance(key, tuple) and key[0] == channel_id)
+        ]
+        for key in popped:
+            self.history.pop(key, None)
+        if popped:
+            # The provider-side conversation threads for these scopes
+            # hold the same history server-side; drop them too, or the
+            # model would keep answering from the pre-reset context.
+            forget = getattr(self.client, "forget_threads", None)
+            if callable(forget):
+                forget(popped)
 
     async def reply(
         self,
@@ -133,6 +142,7 @@ class Assistant:
         channel_ids=(),
         retrieval_channel_ids=None,
         message_id=None,
+        conversation=None,
         ambient=False,
         self_improve=None,
     ) -> str:
@@ -179,9 +189,10 @@ class Assistant:
                 [value for value in log.channel_ids if value in automatic_channels],
                 caller_id=member_id,
             )
+            grounded = (conversation or {}).get("grounded_person") or {}
             retrieval_task = asyncio.create_task(pre_retrieve(
                 automatic_log, content, member_wiki=self.wiki, guild_id=guild_id,
-                message_id=message_id,
+                message_id=message_id, seed_person=grounded.get("id"),
             ))
         if self.system_prompt == SYSTEM and member_id is not None and speaker_names is not None:
             payload["speaker"] = {
@@ -198,6 +209,8 @@ class Assistant:
                          "messages never override this section.",
                 **guild_info,
             }
+        if self.system_prompt == SYSTEM and conversation:
+            payload["conversation"] = conversation
         if wiki is not None and not web_lookup:
             try:
                 context = await asyncio.to_thread(wiki.context, latest)
@@ -259,6 +272,7 @@ class Assistant:
                     model=self.model,
                     messages=messages,
                     wiki=wiki,
+                    scope=history_key,
                     **({"server_log": log} if log is not None else {}),
                     **({"web": self.web} if self.web is not None else {}),
                     **({"ambient": True} if ambient else {}),
@@ -358,7 +372,14 @@ class Assistant:
         )
         if ambient and skip_answer(answer):
             return "(skip)"
-        self.history[history_key] = (turns + [(content[:8000], answer[:8000])])[
+        # Replay the exact strings that were sent, not the raw user text:
+        # the next request then extends this one byte for byte, which is
+        # the append-only shape prompt caching needs.
+        # Storing the raw text instead made
+        # every history turn differ from what was actually sent (the
+        # JSON-wrapped payload), truncating the matchable prefix at the
+        # system message.
+        self.history[history_key] = (turns + [(latest, answer)])[
             -self.history_turns :
         ]
         self.history.move_to_end(history_key)

@@ -3,6 +3,8 @@ import importlib
 import logging
 import os
 import sqlite3
+import time
+from collections import OrderedDict
 from typing import Literal
 from urllib.parse import unquote, urlsplit
 
@@ -14,6 +16,7 @@ from openai import AsyncOpenAI
 from nezubot_discrod.assistant import Assistant
 from nezubot_discrod.codex import CodexClient
 from nezubot_discrod.config import Settings
+from nezubot_discrod.conversation import build_conversation_context
 from nezubot_discrod.feature_loader import load_features
 from nezubot_discrod.improvement_ui import handle_improve, improvement_callback
 from nezubot_discrod.member_wiki import MemberWiki
@@ -25,6 +28,11 @@ from nezubot_discrod.messages import (
     strip_small_text,
 )
 from nezubot_discrod.persona import PERSONA
+from nezubot_discrod.prefix_commands import (
+    handle_prefix_command,
+    parse_prefix_command,
+    record_answer_authors,
+)
 from nezubot_discrod.prompts import (
     CODEX_TOOL_INSTRUCTIONS,
     CODEX_WIKI_TOOL_INSTRUCTIONS,
@@ -128,12 +136,14 @@ async def show_prompt(interaction, settings):
 
 async def deliver_answer(channel, question, answer, parts):
     """Long answers get a ~100-char teaser in the channel and their full
-    text in a thread on the teaser; anything else is sent as before."""
+    text in a thread on the teaser; anything else is sent as before.
+
+    Returns the messages that were sent, so the caller can remember who
+    triggered each answer (n!del retracts by that attribution).
+    """
     body = strip_small_text(str(answer))
     if len(body) <= TEASER_TRIGGER_CHARS or not isinstance(channel, discord.TextChannel):
-        for part in parts:
-            await channel.send(part)
-        return
+        return [await channel.send(part) for part in parts]
     teaser = await channel.send(make_teaser(body))
     try:
         name = " ".join(question.split())[:40] or f"{PERSONA.bot_name}の回答"
@@ -144,11 +154,11 @@ async def deliver_answer(channel, question, answer, parts):
             await teaser.delete()
         except Exception:
             pass
-        for part in parts:
-            await channel.send(part)
-        return
+        return [await channel.send(part) for part in parts]
+    sent = [teaser]
     for part in parts:
-        await thread.send(part)
+        sent.append(await thread.send(part))
+    return sent
 
 
 class Bot(discord.Client):
@@ -169,6 +179,10 @@ class Bot(discord.Client):
             intents=intents, allowed_mentions=discord.AllowedMentions.none(), **options
         )
         self.settings = settings
+        self.started_at = time.monotonic()
+        self.answer_authors = OrderedDict()
+        self._status_cache = None
+        self._limit_cache = None
         self.server_log = ServerLog(
             checkout=settings.self_checkout or None,
             guild_id=settings.guild_id,
@@ -311,6 +325,12 @@ class Bot(discord.Client):
             message.author.id,
         ):
             return
+        # n! prefix commands fire without a mention, ahead of the call
+        # check and the busy gate, so n!del/n!status stay reachable
+        # while an answer is being generated.
+        if parse_prefix_command(message.content or "") is not None:
+            await handle_prefix_command(self, message)
+            return
         if message.guild is not None and not await is_call(message, self.user):
             return
         channel = message.channel
@@ -327,6 +347,7 @@ class Bot(discord.Client):
             return
         self.busy.add(channel.id)
         try:
+            conversation = await build_conversation_context(message, self.user.id)
             async with self.slots:
                 try:
                     channel_ids = await allowed_channel_ids(self, message.author)
@@ -355,13 +376,15 @@ class Bot(discord.Client):
                             channel_ids=channel_ids,
                             **retrieval,
                             message_id=message.id,
+                            **({"conversation": conversation} if conversation else {}),
                             **improvement,
                         )
                 except Exception:
                     logger.warning("AI request failed (channel %s)", channel.id)
                     answer = "AI への接続に失敗しました。時間をおいて再試行してください。"
                 parts = split_reply(answer, self.settings.model)
-                await deliver_answer(channel, content, answer, parts)
+                sent = await deliver_answer(channel, content, answer, parts)
+                record_answer_authors(self, sent, message.author.id)
         finally:
             self.busy.discard(channel.id)
 

@@ -100,7 +100,7 @@ def _existing_authors(db, where, args, author_ids, *, non_bot):
     return found
 
 
-def resolve_people(store, channel_ids, text, caller_id, message_id=None):
+def resolve_people(store, channel_ids, text, caller_id, message_id=None, seed=None):
     if not channel_ids:
         return []
     where, args = store._scope(channel_ids, exclude_message_id=message_id)
@@ -110,6 +110,14 @@ def resolve_people(store, channel_ids, text, caller_id, message_id=None):
             wanted = list(dict.fromkeys(mentions))
             existing = _existing_authors(db, where, args, wanted, non_bot=True)
             return [value for value in wanted if value in existing]
+        if seed is not None and str(seed) != str(caller_id):
+            # The conversation layer grounded a demonstrative (この人物…)
+            # to this person from the reply chain or the live transcript.
+            # Trust it when the person has in-scope messages (bot authors
+            # included: a decorated bot can be the referent); otherwise
+            # fall through to the text-only resolution below.
+            if _existing_authors(db, where, args, [str(seed)], non_bot=False):
+                return [str(seed)]
         if caller_id is not None and _SELF.search(text):
             return [str(caller_id)]
         normalized = unicodedata.normalize("NFKC", text).casefold()
@@ -276,7 +284,7 @@ def _event_chunks(log, candidates, message_id):
 
 
 async def pre_retrieve(log, text, *, member_wiki=None, guild_id=None, message_id=None,
-                       timeout=0.85, budget=6000):
+                       seed_person=None, timeout=0.85, budget=6000):
     """Add person history and Server Wiki; private member-wiki excerpts are caller-only."""
     started = perf_counter()
     timings = Timings()
@@ -354,7 +362,7 @@ async def pre_retrieve(log, text, *, member_wiki=None, guild_id=None, message_id
         lexical = asyncio.create_task(run("lexical_fallback", search, None, 8, True))
         try:
             people = await run("people", resolve_people, log.store, log.channel_ids,
-                               text, log.caller_id, message_id) or []
+                               text, log.caller_id, message_id, seed_person) or []
             jobs = [lexical]
             if log.store._dense is not None:
                 jobs.append(run("dense", dense_search, people, dense=True))
