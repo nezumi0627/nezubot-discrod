@@ -9,6 +9,11 @@ from time import monotonic
 
 from nezubot_discrod.ambient import skip_answer
 from nezubot_discrod.config import SandboxSettings
+from nezubot_discrod.conversation_state import (
+    ConversationStateStore,
+    active_topic_view,
+    state_context_view,
+)
 from nezubot_discrod.member_wiki import TOOL_PARAMETERS, WIKI_TOOLS, WikiError
 from nezubot_discrod.messages import (
     Reply,
@@ -21,9 +26,10 @@ from nezubot_discrod.messages import (
 )
 from nezubot_discrod.persona import PERSONA
 from nezubot_discrod.prompts import SELF_MOD_PROMPT, SYSTEM, conversation_prompt
+from nezubot_discrod.query_rewrite import build_context_query, rewrite_query
 from nezubot_discrod.sandbox import run_command
 from nezubot_discrod.server_log import format_hits
-from nezubot_discrod.server_log_context import pre_retrieve
+from nezubot_discrod.server_log_context import ROUTE_BUDGETS_MS, pre_retrieve
 from nezubot_discrod.server_log_tools import LOG_PARAMETERS, LOG_TOOLS, LogTools
 from nezubot_discrod.web_tools import WEB_PARAMETERS, WEB_TOOLS, has_web_content
 
@@ -120,6 +126,13 @@ class Assistant:
         # no person signal of its own (どこ住み？ after 〇〇について)
         # continues the same subject. Entries expire after ten minutes.
         self.person_carryover = {}
+        # Structured per-channel conversation state (topic, active
+        # subject, established facts, attempted solutions), persisted
+        # in the server log DB; drives the role-structured context and
+        # contextual query rewriting.
+        self.conversation_states = (
+            ConversationStateStore(server_log) if server_log is not None else None
+        )
 
     def reset(self, channel_id: int):
         popped = [
@@ -129,6 +142,8 @@ class Assistant:
         for key in popped:
             self.history.pop(key, None)
             self.person_carryover.pop(key, None)
+        if popped and self.conversation_states is not None:
+            self.conversation_states.clear(str(channel_id))
         if popped:
             # The provider-side conversation threads for these scopes
             # hold the same history server-side; drop them too, or the
@@ -180,6 +195,30 @@ class Assistant:
         )
         system = self.system_prompt
         latest = content[:8000]
+        turn_state = None
+        turn_people = []
+        if (
+            self.system_prompt == SYSTEM and not ambient and conversation
+            and self.conversation_states is not None
+        ):
+            # Fold the running conversation state into the payload as
+            # role-structured fields (active_topic / conversation_state)
+            # so the model reads what the conversation has settled
+            # instead of re-deriving it from the raw transcript.
+            try:
+                turn_state = await asyncio.to_thread(
+                    self.conversation_states.load, str(channel_id)
+                )
+            except Exception:
+                turn_state = None
+            enriched = dict(conversation)
+            topic_view = active_topic_view(turn_state, conversation)
+            if topic_view:
+                enriched["active_topic"] = topic_view
+            state_view = state_context_view(turn_state)
+            if state_view:
+                enriched["conversation_state"] = state_view
+            conversation = enriched
         payload = {"message": latest}
         retrieved_sources = []
         recent_urls = []
@@ -200,10 +239,17 @@ class Assistant:
             carryover = self.person_carryover.get(history_key)
             if carryover is not None and monotonic() - carryover[1] > 600:
                 carryover = None
+            search_text = rewrite_query(
+                content, state=turn_state, conversation=conversation,
+                speaker_name=(speaker_names or {}).get("display_name"),
+            )
+            context_query = build_context_query(conversation, turn_state)
             retrieval_task = asyncio.create_task(pre_retrieve(
                 automatic_log, content, member_wiki=self.wiki, guild_id=guild_id,
                 message_id=message_id, seed_person=grounded.get("id"),
                 carryover_person=carryover[0] if carryover else None,
+                budgets=ROUTE_BUDGETS_MS, search_text=search_text,
+                context_query=context_query,
             ))
         if self.system_prompt == SYSTEM and member_id is not None and speaker_names is not None:
             payload["speaker"] = {
@@ -247,6 +293,7 @@ class Assistant:
             if retrieval_task is not None:
                 retrieved = await retrieval_task
                 resolved = (getattr(retrieved, "diagnostics", None) or {}).get("people") or []
+                turn_people = resolved
                 settled = (
                     resolved[0] if len(resolved) == 1
                     else grounded.get("id") if grounded else None
@@ -390,6 +437,27 @@ class Assistant:
         )
         if ambient and skip_answer(answer):
             return "(skip)"
+        if (
+            self.conversation_states is not None and conversation is not None
+            and not ambient and self.system_prompt == SYSTEM
+        ):
+            # Fold this answered turn into the channel's conversation
+            # state, so the next follow-up inherits the topic, the
+            # settled subject and what has already been attempted.
+            anchor = {
+                "id": str(message_id) if message_id is not None else "",
+                "author_id": str(member_id) if member_id is not None else "",
+                "author_name": (speaker_names or {}).get("display_name"),
+                "content": content,
+            }
+            try:
+                await asyncio.to_thread(
+                    self.conversation_states.update, str(channel_id),
+                    anchor=anchor, question=content, conversation=conversation,
+                    resolved_people=turn_people, answer_summary=answer,
+                )
+            except Exception:
+                logger.warning("Conversation state update failed", exc_info=True)
         # Replay the exact strings that were sent, not the raw user text:
         # the next request then extends this one byte for byte, which is
         # the append-only shape prompt caching needs.

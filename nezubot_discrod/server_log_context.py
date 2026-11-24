@@ -145,73 +145,113 @@ def _dominant_author(db, where, args, author_ids):
 
 
 def resolve_people(store, channel_ids, text, caller_id, message_id=None, seed=None,
-                   carryover=None):
+                   carryover=None, deadline=None):
+    """Resolve the people a question is about, in priority order.
+
+    deadline is an absolute perf_counter() time for the grounding
+    route's own budget: the resolution SQL runs under a progress
+    handler on this call's dedicated connection and is interrupted
+    once the budget is spent, degrading to no people rather than
+    eating the dense route's budget too."""
     if not channel_ids:
         return []
     where, args = store._scope(channel_ids, exclude_message_id=message_id)
     with store.connect() as db:
-        mentions = re.findall(r"<@!?(\d+)>", text)
-        if mentions:
-            wanted = list(dict.fromkeys(mentions))
-            existing = _existing_authors(db, where, args, wanted, non_bot=True)
-            return [value for value in wanted if value in existing]
-        if seed is not None and str(seed) != str(caller_id):
-            # The conversation layer grounded a demonstrative (この人物…)
-            # to this person from the reply chain or the live transcript.
-            # Trust it when the person has in-scope messages (bot authors
-            # included: a decorated bot can be the referent); otherwise
-            # fall through to the text-only resolution below.
-            if _existing_authors(db, where, args, [str(seed)], non_bot=False):
-                return [str(seed)]
-        if caller_id is not None and _SELF.search(text):
-            return [str(caller_id)]
-        normalized = unicodedata.normalize("NFKC", text).casefold()
-        snapshot = _alias_snapshot(store, channel_ids, db)
-        # Group matches by the name that hit (full alias or its decorated
-        # core): when one name maps to several people and the caller is
-        # among them, the caller means themselves, so that name resolves
-        # to the caller alone instead of going ambiguous.
-        matched = {}
-        cores = snapshot.core_names()
-        for (alias, author_id), core in zip(snapshot.rows, cores, strict=True):
-            for form in (alias, core):
-                if form is None or len(form) < 2 or form not in normalized:
-                    continue
-                pattern = re.escape(form)
-                if form.isascii():
-                    pattern = r"(?<![a-z0-9_])" + pattern + r"(?![a-z0-9_])"
-                if re.search(pattern, normalized):
-                    matched.setdefault(form, set()).add(author_id)
-                    break
-        resolved = set()
-        for form_ids in matched.values():
-            if caller_id is not None and str(caller_id) in form_ids and len(form_ids) > 1:
-                form_ids = {str(caller_id)}
-            existing = _existing_authors(db, where, args, form_ids, non_bot=True)
-            if not existing:
-                # The name may belong only to bot/bridge accounts (the
-                # decorated さくら#abcd accounts are all webhooks);
-                # the token fallback already resolves bot authors for
-                # ASCII names, so do the same here before giving up.
-                existing = _existing_authors(db, where, args, form_ids, non_bot=False)
-            if len(existing) > 1:
-                dominant = _dominant_author(db, where, args, existing)
-                if dominant is not None:
-                    existing = {dominant}
-            resolved.update(existing)
-        if resolved:
-            return sorted(resolved)
-        fallback = _token_fallback_people(db, snapshot, where, args, normalized)
-        if fallback:
-            return fallback
-        if carryover is not None:
-            # A follow-up with no person signal of its own (どこ住み？
-            # after asking about someone) continues the previous turn's
-            # subject; the caller supplies the person that turn settled
-            # on. Only used when nothing in the text resolved at all.
-            if _existing_authors(db, where, args, [str(carryover)], non_bot=False):
-                return [str(carryover)]
+        if deadline is not None:
+            db.set_progress_handler(
+                lambda: 1 if perf_counter() > deadline else 0, 1000
+            )
+        try:
+            return _resolve_people_db(
+                db, store, where, args, channel_ids, text, caller_id,
+                message_id, seed, carryover, deadline,
+            )
+        except sqlite3.OperationalError as error:
+            if deadline is not None and "interrupted" in str(error).lower():
+                logger.info("Person grounding exceeded its budget; resolving to nobody")
+                return []
+            raise
+        finally:
+            if deadline is not None:
+                db.set_progress_handler(None, 0)
+
+
+def _resolve_people_db(db, store, where, args, channel_ids, text, caller_id,
+                       message_id, seed, carryover, deadline=None):
+    def over_budget():
+        # Explicit checkpoints complement the progress handler: short
+        # queries can finish between its callbacks, so a spent budget
+        # is also honoured at each phase boundary.
+        return deadline is not None and perf_counter() > deadline
+
+    if over_budget():
         return []
+    mentions = re.findall(r"<@!?(\d+)>", text)
+    if mentions:
+        wanted = list(dict.fromkeys(mentions))
+        existing = _existing_authors(db, where, args, wanted, non_bot=True)
+        return [value for value in wanted if value in existing]
+    if seed is not None and str(seed) != str(caller_id):
+        # The conversation layer grounded a demonstrative (この人物…)
+        # to this person from the reply chain or the live transcript.
+        # Trust it when the person has in-scope messages (bot authors
+        # included: a decorated bot can be the referent); otherwise
+        # fall through to the text-only resolution below.
+        if _existing_authors(db, where, args, [str(seed)], non_bot=False):
+            return [str(seed)]
+    if caller_id is not None and _SELF.search(text):
+        return [str(caller_id)]
+    normalized = unicodedata.normalize("NFKC", text).casefold()
+    if over_budget():
+        return []
+    snapshot = _alias_snapshot(store, channel_ids, db)
+    # Group matches by the name that hit (full alias or its decorated
+    # core): when one name maps to several people and the caller is
+    # among them, the caller means themselves, so that name resolves
+    # to the caller alone instead of going ambiguous.
+    matched = {}
+    cores = snapshot.core_names()
+    for (alias, author_id), core in zip(snapshot.rows, cores, strict=True):
+        for form in (alias, core):
+            if form is None or len(form) < 2 or form not in normalized:
+                continue
+            pattern = re.escape(form)
+            if form.isascii():
+                pattern = r"(?<![a-z0-9_])" + pattern + r"(?![a-z0-9_])"
+            if re.search(pattern, normalized):
+                matched.setdefault(form, set()).add(author_id)
+                break
+    resolved = set()
+    for form_ids in matched.values():
+        if caller_id is not None and str(caller_id) in form_ids and len(form_ids) > 1:
+            form_ids = {str(caller_id)}
+        existing = _existing_authors(db, where, args, form_ids, non_bot=True)
+        if not existing:
+            # The name may belong only to bot/bridge accounts (the
+            # decorated さくら#abcd accounts are all webhooks);
+            # the token fallback already resolves bot authors for
+            # ASCII names, so do the same here before giving up.
+            existing = _existing_authors(db, where, args, form_ids, non_bot=False)
+        if len(existing) > 1:
+            dominant = _dominant_author(db, where, args, existing)
+            if dominant is not None:
+                existing = {dominant}
+        resolved.update(existing)
+    if resolved:
+        return sorted(resolved)
+    if over_budget():
+        return []
+    fallback = _token_fallback_people(db, snapshot, where, args, normalized)
+    if fallback:
+        return fallback
+    if carryover is not None:
+        # A follow-up with no person signal of its own (どこ住み？
+        # after asking about someone) continues the previous turn's
+        # subject; the caller supplies the person that turn settled
+        # on. Only used when nothing in the text resolved at all.
+        if _existing_authors(db, where, args, [str(carryover)], non_bot=False):
+            return [str(carryover)]
+    return []
 
 
 def _alias_token_keys(alias):
@@ -359,9 +399,40 @@ def _event_chunks(log, candidates, message_id):
                 delivered += 1
 
 
+# Per-route retrieval budgets (milliseconds). The single shared 850ms
+# pool let the lexical stage eat everything and the dense route almost
+# never ran (measured: deadline 73%, dense executed 2/44 turns). Each
+# route now owns a slice — grounding, lexical, dense (query embedding
+# included), aux/fusion — with the remainder held as reserve for chunk
+# selection and materialization. pre_retrieve still enforces the total
+# through its timeout argument as a safety net.
+ROUTE_BUDGETS_MS = {
+    # Sized from production measurements, not the design sketch: on the
+    # 3.8GB archive a warm resolve_people takes 10-1300ms (an alias
+    # snapshot rebuild is seconds), the FTS stage's own soft deadline
+    # is 450ms, and a dense query embedding alone can take ~300ms on
+    # this CPU. The budgets keep one route from starving the others
+    # inside the caller's overall timeout; they are not latency goals.
+    "grounding_ms": 400,
+    "lexical_ms": 400,
+    "dense_ms": 500,
+    "aux_ms": 250,
+    "reserve_ms": 100,
+}
+
+
 async def pre_retrieve(log, text, *, member_wiki=None, guild_id=None, message_id=None,
-                       seed_person=None, carryover_person=None, timeout=0.85, budget=6000):
-    """Add person history and Server Wiki; private member-wiki excerpts are caller-only."""
+                       seed_person=None, carryover_person=None, timeout=0.85, budget=6000,
+                       budgets=None, search_text=None, context_query=None):
+    """Add person history and Server Wiki; private member-wiki excerpts are caller-only.
+
+    search_text replaces the question for the archive searches (a
+    contextual rewrite that makes a demonstrative/follow-up question
+    self-contained); people resolution and event matching keep the
+    original text. context_query, when given, drives one extra dense
+    search built from the live conversation, so relevant past messages
+    surface from the flow of the discussion rather than only from the
+    question's own words."""
     started = perf_counter()
     timings = Timings()
     token = CURRENT.set(timings)
@@ -374,25 +445,38 @@ async def pre_retrieve(log, text, *, member_wiki=None, guild_id=None, message_id
     # The hybrid (aux) path is enabled only while grounding has not
     # settled on anyone; work() closes the gate once people resolve.
     hybrid_gate = {"allow": True}
+    route_budgets = None
+    grounding_deadline = None
+    if budgets is not None:
+        route_budgets = {
+            "lexical_ms": budgets.get("lexical_ms"),
+            "dense_ms": budgets.get("dense_ms"),
+            "aux_ms": budgets.get("aux_ms"),
+        }
+        if budgets.get("grounding_ms") is not None:
+            grounding_deadline = started + budgets["grounding_ms"] / 1000.0
+    effective_text = search_text or text
 
     def publish(kind, chunk):
         if chunk and not stopped.is_set():
             chunks.put((kind, chunk))
 
-    def search(author, limit, lexical_only=False):
+    def search(query_text, author, limit, lexical_only=False, kind=None):
         with stage("lexical_search" if lexical_only else "dense_search"):
             try:
-                hits = log.store.search(text[:2000], channel_ids=log.channel_ids,
+                hits = log.store.search(query_text[:2000], channel_ids=log.channel_ids,
                                         author=author, limit=limit, require_dense=not lexical_only,
                                         infer_author=author is not None,
                                         exclude_message_id=message_id,
                                         lexical_only=lexical_only, snapshot_only=not lexical_only,
-                                        allow_hybrid=hybrid_gate["allow"])
+                                        allow_hybrid=hybrid_gate["allow"],
+                                        route_budgets=route_budgets)
             except DenseSnapshotUnavailable:
                 skipped.append("dense_snapshot")
                 return
             if hits:
-                kind = "lexical" if lexical_only else "author" if author else "dense"
+                if kind is None:
+                    kind = "lexical" if lexical_only else "author" if author else "dense"
                 chunk = LogResult.from_hits(hits)
                 chunk.hits = hits
                 publish(kind, chunk)
@@ -429,21 +513,30 @@ async def pre_retrieve(log, text, *, member_wiki=None, guild_id=None, message_id
             publish("server_wiki", chunk)
 
     def dense_search(people):
-        search(None, 3 if len(people) == 1 else 8)
+        search(effective_text, None, 3 if len(people) == 1 else 8)
         if len(people) == 1 and not stopped.is_set():
             # Five of the person's own messages: the wider author sample
             # is what the model otherwise fetches with a follow-up
             # search_server_log round; the budget gate in the selection
             # loop still decides how much of it is delivered.
-            search(people[0], 5)
+            search(effective_text, people[0], 5)
+        if context_query and not stopped.is_set():
+            # Context-linked recall (the Sakana/vex pattern): one dense
+            # search whose query is the live conversation itself, so
+            # past messages the discussion is circling around surface
+            # even when the question never names them. It shares the
+            # dense route's budget inside store.search.
+            search(context_query, None, 3, kind="context")
 
     async def work():
         nonlocal people
-        lexical = asyncio.create_task(run("lexical_fallback", search, None, 8, True))
+        lexical = asyncio.create_task(
+            run("lexical_fallback", search, effective_text, None, 8, True)
+        )
         try:
             people = await run("people", resolve_people, log.store, log.channel_ids,
                                text, log.caller_id, message_id, seed_person,
-                               carryover_person) or []
+                               carryover_person, grounding_deadline) or []
             if people:
                 hybrid_gate["allow"] = False
             jobs = [lexical]
@@ -485,9 +578,8 @@ async def pre_retrieve(log, text, *, member_wiki=None, guild_id=None, message_id
         available.pop("lexical", None)
     selected, sources, remaining, counts = [], [], budget, {}
     delivered = set()
-    for kind in (
-        "dense", "lexical", "ambiguity", "overview", "member_wiki", "server_wiki", "author"
-    ):
+    for kind in ("dense", "context", "lexical", "ambiguity", "overview",
+                 "member_wiki", "server_wiki", "author"):
         for chunk in available.get(kind, []):
             hits = getattr(chunk, "hits", None)
             if hits is not None:
@@ -525,6 +617,9 @@ async def pre_retrieve(log, text, *, member_wiki=None, guild_id=None, message_id
         "errors": list(failures),
         "chunks": counts, "chars": len(result), "sources": len(sources),
         "people": [str(person) for person in people],
+        "budgets": budgets is not None,
+        "rewritten": bool(search_text and search_text != text),
+        "context_recall": bool(context_query),
     }
     logger.info("Automatic retrieval %s", json.dumps(result.diagnostics, sort_keys=True))
     if status == "cancelled":

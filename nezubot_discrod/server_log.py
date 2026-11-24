@@ -722,13 +722,15 @@ class ServerLog:
     # the chunks that never ran, not the whole stage.
     _LEXICAL_CHUNK_TOKENS = 6
 
-    def _lexical_compute(self, db, tokens, where, args, pool):
+    def _lexical_compute(self, db, tokens, where, args, pool, deadline_ms=None):
         def expression(chunk):
             return " OR ".join(
                 '"' + token.replace('"', '""') + '"' for token in chunk
             )
 
-        budget = self.lexical_deadline_ms / 1000.0
+        budget = (
+            self.lexical_deadline_ms if deadline_ms is None else deadline_ms
+        ) / 1000.0
         if budget <= 0 or len(tokens) <= self._LEXICAL_CHUNK_TOKENS:
             return self._lexical_query(db, expression(tokens), where, args, pool)
         deadline = perf_counter() + budget
@@ -768,10 +770,10 @@ class ServerLog:
             merged.values(), key=lambda row: (row["fts_rank"], row["id"])
         )[:pool]
 
-    def _lexical_rows(self, db, tokens, where, args, pool):
+    def _lexical_rows(self, db, tokens, where, args, pool, deadline_ms=None):
         memo = LEXICAL_MEMO.get()
         if memo is None:
-            return self._lexical_compute(db, tokens, where, args, pool)
+            return self._lexical_compute(db, tokens, where, args, pool, deadline_ms)
         expression = " OR ".join(
             '"' + token.replace('"', '""') + '"' for token in tokens
         )
@@ -790,9 +792,11 @@ class ServerLog:
             entry["event"].wait()
             if entry["rows"] is not None:
                 return entry["rows"]
-            return self._lexical_compute(db, tokens, where, args, pool)
+            return self._lexical_compute(db, tokens, where, args, pool, deadline_ms)
         try:
-            entry["rows"] = self._lexical_compute(db, tokens, where, args, pool)
+            entry["rows"] = self._lexical_compute(
+                db, tokens, where, args, pool, deadline_ms
+            )
             return entry["rows"]
         finally:
             entry["event"].set()
@@ -800,8 +804,14 @@ class ServerLog:
     def search(
         self, query, *, channel_ids, author=None, channel=None, after=None, before=None, limit=10,
         require_dense=False, infer_author=True, exclude_message_id=None, lexical_only=False,
-        snapshot_only=False, allow_hybrid=True,
+        snapshot_only=False, allow_hybrid=True, route_budgets=None,
     ):
+        # route_budgets optionally caps each retrieval route separately
+        # ({"lexical_ms", "dense_ms", "aux_ms"}): a slow route may no
+        # longer eat the caller's whole deadline, because its result is
+        # discarded (dense/aux) or truncated (lexical chunks) once its
+        # own budget is spent. None keeps the previous single-pool
+        # behaviour apart from the lexical stage's own soft deadline.
         if lexical_only and require_dense:
             raise ValueError("lexical_only and require_dense are mutually exclusive")
         if limit < 1:
@@ -833,12 +843,15 @@ class ServerLog:
             dense = None
             reason = self._dense_state
             attempted = False
+            budgets = route_budgets or {}
+            dense_started = None
             if snapshot_only and require_dense and self._dense is not None and not lexical_only:
                 # A missing snapshot is the common failure for this call
                 # shape; probe it before paying for the FTS scan whose
                 # rows the DenseSnapshotUnavailable raise would discard.
                 attempted = True
                 reason = "no usable scoped vectors"
+                dense_started = perf_counter()
                 try:
                     dense = self._dense.search_snapshot(
                         db, query, channel_ids, where, args, pool, author_ids=author,
@@ -855,9 +868,13 @@ class ServerLog:
                             "No published dense snapshot candidates"
                         )
             with stage("lexical"):
-                lexical = self._lexical_rows(db, tokens, where, args, pool)
+                lexical = self._lexical_rows(
+                    db, tokens, where, args, pool,
+                    deadline_ms=budgets.get("lexical_ms"),
+                )
             if self._dense is not None and not lexical_only and not attempted:
                 reason = "no usable scoped vectors"
+                dense_started = perf_counter()
                 try:
                     search = self._dense.search_snapshot if snapshot_only else self._dense.search
                     dense = search(
@@ -869,6 +886,25 @@ class ServerLog:
                     logger.warning(
                         "Dense server log search unavailable; using lexical", exc_info=True
                     )
+            dense_ms = budgets.get("dense_ms")
+            if (
+                dense is not None and dense_ms is not None
+                and dense_started is not None
+                and (perf_counter() - dense_started) * 1000 > dense_ms
+            ):
+                # The dense route overspent its own budget (the query
+                # embedding under load is the usual cause). Its result
+                # arrives too late to leave the caller room for fusion,
+                # so the search degrades exactly as if dense were
+                # unavailable instead of dragging the whole retrieval
+                # past its deadline. Only callers that pass budgets
+                # (pre_retrieve) ever take this branch.
+                logger.info(
+                    "Dense route exceeded its budget (%.0fms > %sms); discarding",
+                    (perf_counter() - dense_started) * 1000, dense_ms,
+                )
+                dense = None
+                reason = "dense budget spent"
             if snapshot_only and dense is None:
                 if require_dense:
                     raise DenseSnapshotUnavailable("No published dense snapshot candidates")
@@ -892,6 +928,8 @@ class ServerLog:
             # an author resolved here (explicit or inferred) counts as
             # scoped too.
             if allow_hybrid and author is None and self.hybrid_model and self._dense is not None:
+                aux_ms = budgets.get("aux_ms")
+                aux_started = perf_counter()
                 try:
                     aux_search = (
                         self._dense.search_aux_snapshot if snapshot_only
@@ -905,6 +943,15 @@ class ServerLog:
                     logger.warning(
                         "Hybrid dense search unavailable; using two-path fusion",
                         exc_info=True,
+                    )
+                    extra_dense = None
+                if (
+                    extra_dense is not None and aux_ms is not None
+                    and (perf_counter() - aux_started) * 1000 > aux_ms
+                ):
+                    logger.info(
+                        "Hybrid route exceeded its budget (%.0fms > %sms); discarding",
+                        (perf_counter() - aux_started) * 1000, aux_ms,
                     )
                     extra_dense = None
             ids = _fusion(query, lexical, dense, pool,
