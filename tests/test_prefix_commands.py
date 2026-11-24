@@ -12,7 +12,6 @@ import pytest
 from nezubot_discrod.bot import Bot, deliver_answer
 from nezubot_discrod.config import SandboxSettings, Settings
 from nezubot_discrod.prefix_commands import (
-    HELP_TEXT,
     handle_prefix_command,
     parse_prefix_command,
     record_answer_authors,
@@ -96,23 +95,13 @@ def http_error(status=403):
     )
 
 
-def test_help_sends_usage_by_dm_only():
-    message = make_message(content="n!help")
+@pytest.mark.parametrize("content", ["n!help", "n!status", "n!limit", "N!HELP"])
+def test_retired_info_commands_are_silent(content):
+    message = make_message(content=content)
     assert asyncio.run(handle_prefix_command(make_bot(), message)) is True
-    message.author.send.assert_awaited_once_with(content=HELP_TEXT, embed=None)
+    message.author.send.assert_not_awaited()
     message.channel.send.assert_not_awaited()
-    message.add_reaction.assert_awaited_once_with("📩")
-    assert "n!del" in HELP_TEXT and "n!status" in HELP_TEXT
-
-
-def test_help_dm_failure_never_posts_publicly(caplog):
-    message = make_message(content="n!help")
-    message.author.send = AsyncMock(side_effect=http_error(403))
-    with caplog.at_level(logging.WARNING, logger="nezubot_discrod.prefix_commands"):
-        assert asyncio.run(handle_prefix_command(make_bot(), message)) is True
-    message.channel.send.assert_not_awaited()
-    message.add_reaction.assert_awaited_once_with("⚠️")
-    assert any("not posting publicly" in record.message for record in caplog.records)
+    message.add_reaction.assert_not_awaited()
 
 
 def test_non_command_is_not_handled():
@@ -298,34 +287,6 @@ def test_status_embed_shows_rates_and_counts(status_paths):
     assert "v1.5.0" in embed.description and "gpt-test" in embed.description
 
 
-def test_status_command_uses_cache(status_paths):
-    db_path, server_wiki_path = status_paths
-    server_log = SimpleNamespace(
-        path=db_path, model=TEACHER, static_model=STATIC
-    )
-    bot = make_bot(server_log=server_log)
-    message = make_message(content="n!status")
-    asyncio.run(handle_prefix_command(bot, message))
-    first = message.author.send.call_args.kwargs["embed"]
-    assert "50.00%" in {
-        field.name: field.value for field in first.fields
-    }["🎓 学習率（埋め込みカバー率）"]
-    message.channel.send.assert_not_awaited()
-    db_path.unlink()
-    server_wiki_path.unlink()
-    message.author.send.reset_mock()
-    asyncio.run(handle_prefix_command(bot, message))
-    second = message.author.send.call_args.kwargs["embed"]
-    assert second.fields[0].value == first.fields[0].value
-
-
-def test_status_failure_notice_goes_to_dm_only():
-    message = make_message(content="n!status")
-    asyncio.run(handle_prefix_command(make_bot(server_log=None), message))
-    assert "集計に失敗" in message.author.send.call_args.kwargs["content"]
-    message.channel.send.assert_not_awaited()
-
-
 def test_format_helpers():
     assert format_uptime(30) == "30秒"
     assert format_uptime(90) == "1分30秒"
@@ -336,7 +297,7 @@ def test_format_helpers():
     assert format_size(3029008384).endswith("GiB")
 
 
-def test_on_message_routes_prefix_command_without_mention():
+def test_on_message_swallows_retired_command_without_mention():
     bot = SimpleNamespace(
         settings=Settings(
             "token", "key", "https://example.com", "test",
@@ -349,5 +310,6 @@ def test_on_message_routes_prefix_command_without_mention():
     message.guild = SimpleNamespace(id=123, owner_id=GUILD_OWNER_ID)
     message.mentions = []
     asyncio.run(Bot.on_message(bot, message))
-    message.author.send.assert_awaited_once_with(content=HELP_TEXT, embed=None)
+    message.author.send.assert_not_awaited()
     message.channel.send.assert_not_awaited()
+    message.add_reaction.assert_not_awaited()
