@@ -215,3 +215,38 @@ def test_on_message_routes_conversation_context_to_the_assistant():
     assert conversation["grounded_person"]["id"] == "301"
     assert conversation["grounded_person"]["basis"] == "recent_speaker"
     assert "AzazeliusZ" in conversation["transcript"]
+
+
+class UnfetchableChannel(FakeChannel):
+    """History works, but reply-target fetches always fail (deleted or
+    uncached targets in production take the same path)."""
+
+    async def fetch_message(self, message_id):
+        raise LookupError(message_id)
+
+
+def test_reply_target_found_in_transcript_when_chain_fetch_fails():
+    intro = message(1, AZAZEL, "皆さん、こんにちは！AIコンパニオンのベータ版が完成しました",
+                    minutes=0)
+    reply = message(2, KOKURA, "ください", minutes=1, reply_to=reference(1))
+    anchor = message(3, KOKURA, "この人物の過去のメッセージさがして", minutes=3,
+                     reply_to=reference(1), channel=UnfetchableChannel([intro, reply]))
+    context = build(anchor)
+    grounded = context["grounded_person"]
+    assert grounded["id"] == str(AZAZEL.id)
+    assert grounded["basis"] == "reply_target"
+
+
+def test_most_discussed_person_beats_recent_speaker():
+    intro = message(1, AZAZEL, "皆さん、こんにちは！AIコンパニオンのベータ版が完成しました",
+                    minutes=0)
+    reply1 = message(2, KOKURA, "ください", minutes=1, reply_to=reference(1))
+    reply2 = message(3, CAROL, "リンクはどこですか", minutes=2, reply_to=reference(1))
+    chatter = message(4, CAROL, "今日は暑いね", minutes=3)
+    latest = message(5, CAROL, "xbox の話の続き", minutes=4)
+    anchor = message(6, KOKURA, "この人物について教えて", minutes=5,
+                     channel=FakeChannel([intro, reply1, reply2, chatter, latest]))
+    context = build(anchor)
+    grounded = context["grounded_person"]
+    assert grounded["id"] == str(AZAZEL.id)
+    assert grounded["basis"] == "discussed_in_transcript"

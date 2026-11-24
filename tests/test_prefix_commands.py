@@ -313,3 +313,28 @@ def test_on_message_swallows_retired_command_without_mention():
     message.author.send.assert_not_awaited()
     message.channel.send.assert_not_awaited()
     message.add_reaction.assert_not_awaited()
+
+
+def test_collect_status_prefers_worker_snapshot(status_paths):
+    from nezubot_discrod.status import write_status_snapshot
+
+    db_path, server_wiki_path = status_paths
+    written = write_status_snapshot(
+        db_path, teacher_model=TEACHER, static_model=STATIC, server_wiki_path=server_wiki_path
+    )
+    assert written["total_messages"] == 4 and written["teacher_covered"] == 1
+    # The archive moves on; collect_status still serves the snapshot row
+    # instead of rescanning.
+    db = sqlite3.connect(db_path)
+    db.execute(
+        "INSERT INTO messages VALUES ('m7', 'g', 'c9', 'a9', 0, 0, 'brand new message')"
+    )
+    db.commit()
+    db.close()
+    stats = collect_status(
+        db_path, teacher_model=TEACHER, static_model=STATIC, server_wiki_path=server_wiki_path
+    )
+    assert stats["total_messages"] == 4
+    assert stats["eligible"] == 2 and stats["static_only"] == 1
+    assert stats["server_wiki_people"] == 2 and stats["server_wiki_events"] == 1
+    assert stats["db_bytes"] >= db_path.stat().st_size

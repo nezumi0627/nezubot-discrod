@@ -218,3 +218,36 @@ def test_feature_registry_rejects_info_names(name):
     registry, _pending = command_registry(tree, GUILD_ID, 0)
     with pytest.raises(ValueError):
         registry.register(name=name, description="x", callback=_dummy_callback)
+
+
+def test_cached_status_serves_stale_and_refreshes_in_background(tmp_path, monkeypatch):
+    import nezubot_discrod.bot as bot_module
+    from nezubot_discrod.bot import cached_status
+
+    calls = {"count": 0}
+
+    def fake_collect(path, *, teacher_model, static_model=None, server_wiki_path=None):
+        calls["count"] += 1
+        return {"total_messages": calls["count"]}
+
+    monkeypatch.setattr(bot_module, "collect_status", fake_collect)
+    bot = make_status_bot(tmp_path / "unused.db")
+    bot._status_refreshing = False
+
+    async def run():
+        first = await cached_status(bot)
+        assert first["total_messages"] == 1 and calls["count"] == 1
+        # Fresh cache: no refetch.
+        assert (await cached_status(bot))["total_messages"] == 1
+        assert calls["count"] == 1
+        # Stale cache: the old value comes back immediately and exactly
+        # one background refresh is scheduled.
+        bot._status_cache = (time.monotonic() - 10000, {"total_messages": 1})
+        stale = await cached_status(bot)
+        assert stale["total_messages"] == 1
+        await asyncio.sleep(0.1)
+        assert calls["count"] == 2
+        assert bot._status_cache[1]["total_messages"] == 2
+        assert bot._status_refreshing is False
+
+    asyncio.run(run())

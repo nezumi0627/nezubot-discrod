@@ -139,3 +139,46 @@ def test_empty_snapshot_and_failed_refresh_do_not_discard_published_snapshot(tmp
     with pytest.raises(ValueError, match="invalid vector"):
         dense.refresh_snapshot()
     assert dense.snapshot is previous and hits(store) == ["1"]
+
+
+def test_disk_cache_restores_snapshot_without_rebuild(tmp_path):
+    path = tmp_path / "archive" / "server_log.db"
+    store = dense_store(ServerLog(path))
+    store.upsert_many([record(1, text="semantic original"), record(2, text="Rust original")])
+    store.embed_pending()
+    store._dense.refresh_snapshot()
+    cache = path.parent / (path.name + ".dense-cache")
+    assert (cache / "meta.json").exists()
+
+    store2 = dense_store(ServerLog(path))
+    dense2 = store2.enable_dense()
+    with store2.connect() as db:
+        db.execute("BEGIN")
+        assert dense2._sync(db) is True
+    # Restored from disk: no full rebuild was needed.
+    assert dense2.rebuilds == 0 and dense2.size == 2
+    dense2.refresh_snapshot()
+    with store2.connect() as db:
+        db.execute("BEGIN")
+        where, args = store2._scope([10])
+        result = dense2.search_snapshot(db, "質問", [10], where, args, 10)
+    assert result is not None and set(result) == {"1", "2"}
+
+
+def test_disk_cache_corruption_falls_back_to_rebuild(tmp_path):
+    path = tmp_path / "archive" / "server_log.db"
+    store = dense_store(ServerLog(path))
+    store.upsert_many([record(1, text="semantic original"), record(2, text="Rust original")])
+    store.embed_pending()
+    store._dense.refresh_snapshot()
+    matrix = path.parent / (path.name + ".dense-cache") / "matrix.npy"
+    data = bytearray(matrix.read_bytes())
+    data[-1] ^= 0xFF
+    matrix.write_bytes(bytes(data))
+
+    store2 = dense_store(ServerLog(path))
+    dense2 = store2.enable_dense()
+    with store2.connect() as db:
+        db.execute("BEGIN")
+        assert dense2._sync(db) is True
+    assert dense2.rebuilds == 1 and dense2.size == 2

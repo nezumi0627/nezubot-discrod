@@ -202,3 +202,26 @@ def test_search_uses_ft_encoder_and_falls_back_when_it_breaks(tmp_path):
     plain.enable_dense()
     plain_hits = plain.search("semantic hybrid", channel_ids=[10], limit=10)
     assert [hit.id for hit in fallback_hits] == [hit.id for hit in plain_hits]
+
+
+def test_aux_skipped_when_search_is_author_scoped(tmp_path):
+    teacher, ft = TeacherEmbedder(), FtEmbedder()
+    store = hybrid_store(tmp_path, teacher=teacher, ft=ft)
+    store.upsert_many([
+        record(1, text="semantic lesson"),
+        record(2, text="hybrid discovery", author="bob"),
+    ])
+    assert store.embed_pending() == 2
+    assert store.embed_pending_hybrid() == 2
+    store.enable_dense().refresh_snapshot()
+    ft.inputs.clear()
+    hits = store.search("hybrid", channel_ids=[10], author="alice",
+                        require_dense=True, snapshot_only=True)
+    assert hits and ft.inputs == []
+    hits = store.search("hybrid", channel_ids=[10],
+                        require_dense=True, snapshot_only=True)
+    assert hits and any("hybrid" in text for text in ft.inputs)
+    ft.inputs.clear()
+    store.search("hybrid", channel_ids=[10], require_dense=True,
+                 snapshot_only=True, allow_hybrid=False)
+    assert ft.inputs == []

@@ -91,7 +91,11 @@ def test_identity_ambiguity_and_tombstones(archive):
     other = record(58)
     other["author"]["id"] = "21"
     archive.upsert(other)
-    assert resolve_people(archive, [10], "aliceについて", 20) == ["20", "21"]
+    # A third party asking about a shared name gets the ambiguity...
+    assert resolve_people(archive, [10], "aliceについて", 999) == ["20", "21"]
+    # ...but when the caller's own name is among the matches, the caller
+    # means themselves and wins over the ambiguity.
+    assert resolve_people(archive, [10], "aliceについて", 20) == ["20"]
     assert resolve_people(archive, [10], "<@21>について", 20) == ["21"]
     assert resolve_people(archive, [10], "おれの情報", 20) == ["20"]
     assert archive.collect(channel_ids=[10], author="alice")["ambiguous_author_ids"] == ["20", "21"]
@@ -340,7 +344,11 @@ def test_ambiguous_names_never_inject_another_persons_wiki(archive, monkeypatch)
     archive._dense = object()
     monkeypatch.setattr(archive, "search", lambda *a, **kw: [])
     memory = Mock()
-    result = asyncio.run(pre_retrieve(LogTools(archive, [10], caller_id=20),
+    # The caller is not one of the alices: the shared name stays
+    # ambiguous, no person is resolved, and no member wiki is touched.
+    # (A caller whose own name is among the matches resolves to
+    # themselves instead; see test_identity_ambiguity_and_tombstones.)
+    result = asyncio.run(pre_retrieve(LogTools(archive, [10], caller_id=999),
                                      "aliceについて", member_wiki=memory, guild_id=100))
     assert "Ambiguous people" in result and "Speaker overview" not in result
     memory.for_member.assert_not_called()
@@ -565,3 +573,58 @@ def test_pre_retrieve_seed_delivers_that_persons_evidence(archive):
     seeded = asyncio.run(pre_retrieve(log, question, seed_person="20", timeout=5))
     assert "Speaker overview" in seeded
     assert seeded.sources
+
+
+def test_self_reference_dialect_and_particles(archive):
+    # うち is a first person in dialect; と/とか/って after a self noun
+    # still refer to the speaker (俺とかはどう was a production miss).
+    assert resolve_people(archive, [10], "うちについておしえて", 20) == ["20"]
+    assert resolve_people(archive, [10], "俺とかはどう", 20) == ["20"]
+    assert resolve_people(archive, [10], "俺ってどう思う", 20) == ["20"]
+    assert resolve_people(archive, [10], "うちについておしえて", 999) == ["999"]
+
+
+def test_decorated_display_name_core_resolves(archive):
+    value = record(50, author="bob", text="Fluxer の話")
+    value["author"]["global_name"] = "さくら#abcd"
+    archive.upsert(value)
+    # The stored alias is the decorated name; the question uses the core.
+    assert resolve_people(archive, [10], "さくらについておしえて", 999) == ["21"]
+
+
+def test_carryover_fills_signal_less_followup(archive):
+    other = record(51, author="bob", text="bob の発言")
+    archive.upsert(other)
+    # No person signal at all: the previous turn's subject carries over.
+    assert resolve_people(archive, [10], "どこ住みかわかる？", 999) == []
+    assert resolve_people(archive, [10], "どこ住みかわかる？", 999,
+                          carryover="21") == ["21"]
+    # A name in the text always beats the carryover.
+    assert resolve_people(archive, [10], "aliceについて", 999,
+                          carryover="21") == ["20"]
+    # A carryover with no in-scope messages is ignored.
+    assert resolve_people(archive, [10], "どこ住みかわかる？", 999,
+                          carryover="424242") == []
+
+
+def test_decorated_bot_accounts_resolve_to_dominant_author(archive):
+    # Bridge/bot accounts sharing one decorated name: the primary path
+    # requires human authors, so these resolve through the bot-inclusive
+    # retry, and the account with the overwhelming volume wins.
+    rows = []
+    for index in range(55):
+        value = record(1, author="sakura-main", text=f"さくらの発言 {index}", bot=True)
+        value["id"] = f"9{index:03d}"
+        value["author"]["id"] = "31"
+        value["author"]["global_name"] = "さくら#abcd"
+        value["timestamp"] = f"2025-01-{(index % 28) + 1:02d}T00:00:00Z"
+        rows.append(value)
+    for index in range(4):
+        value = record(1, author="sakura-alt", text=f"別さくらの発言 {index}", bot=True)
+        value["id"] = f"8{index:03d}"
+        value["author"]["id"] = "32"
+        value["author"]["global_name"] = "さくら#abcd"
+        value["timestamp"] = f"2025-02-{(index % 28) + 1:02d}T00:00:00Z"
+        rows.append(value)
+    archive.upsert_many(rows)
+    assert resolve_people(archive, [10], "さくらについておしえて", 999) == ["31"]

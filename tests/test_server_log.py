@@ -1575,3 +1575,45 @@ def test_embedding_does_not_skip_stale_or_other_model_vector(store, model, hash_
         row = db.execute("SELECT * FROM message_vectors WHERE model = ?", (store.model,)).fetchone()
         assert row["vector"] == b"\x00\x00\x00\x3c"
         assert row["text_hash"] == text_hash(db.execute("SELECT * FROM messages").fetchone())
+
+
+def test_chunked_lexical_matches_single_shot_results(store, monkeypatch):
+    store.upsert_many([
+        record(1, text="検索エンジンの高速化について議論した"),
+        record(2, text="埋め込みベクトルの正規化と類似度計算の話"),
+        record(3, text="検索エンジンと埋め込みの両方を使う設計"),
+        record(4, text="全然関係ない料理の話"),
+    ])
+    query = "検索エンジンと埋め込みベクトルを組み合わせた検索の設計について教えて"
+    assert len(set(bigrams(query))) > ServerLog._LEXICAL_CHUNK_TOKENS
+    chunked = store.search(query, channel_ids=[10], lexical_only=True)
+    monkeypatch.setattr(store, "lexical_deadline_ms", 0)
+    single = store.search(query, channel_ids=[10], lexical_only=True)
+    assert {hit.id for hit in chunked} == {hit.id for hit in single}
+    assert {hit.id for hit in chunked} >= {"1", "3"}
+
+
+def test_lexical_soft_deadline_aborts_to_partial_rows(store, monkeypatch):
+    store.upsert_many([
+        record(1, text="検索エンジンの高速化について議論した"),
+        record(2, text="埋め込みベクトルの正規化と類似度計算の話"),
+        record(3, text="検索エンジンと埋め込みの両方を使う設計"),
+    ])
+    original = ServerLog._lexical_query
+    calls = {"count": 0}
+
+    def flaky(db, expression, where, args, pool):
+        calls["count"] += 1
+        if calls["count"] > 1:
+            # What the progress handler does when the deadline passes.
+            raise sqlite3.OperationalError("interrupted")
+        return original(db, expression, where, args, pool)
+
+    monkeypatch.setattr(ServerLog, "_lexical_query", staticmethod(flaky))
+    store.lexical_deadline_ms = 450
+    hits = store.search(
+        "検索エンジンと埋め込みベクトルを組み合わせた検索の設計について教えて",
+        channel_ids=[10], lexical_only=True,
+    )
+    # The second chunk was aborted; the first chunk's rows still answer.
+    assert calls["count"] > 1 and hits
