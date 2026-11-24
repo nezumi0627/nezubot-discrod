@@ -1,8 +1,8 @@
 # nezubot-discrod
 
 ![Python](https://img.shields.io/badge/python-3.12%2B-blue)
-![Version](https://img.shields.io/badge/version-1.10.3-informational)
-![Tests](https://img.shields.io/badge/tests-1216%20passed-brightgreen)
+![Version](https://img.shields.io/badge/version-1.10.4-informational)
+![Tests](https://img.shields.io/badge/tests-1224%20passed-brightgreen)
 
 **メンションに答える Discord AI Bot。** サーバー全体の発言ログを検索（RAG）して
 過去の会話や人物について答え、メンバーごとの記憶（Wiki）を持ちます。
