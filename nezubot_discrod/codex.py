@@ -661,7 +661,7 @@ class CodexClient:
     @staticmethod
     def _server_env(root):
         env = {key: os.environ[key] for key in (
-            "PATH", "LANG", "SSL_CERT_FILE",
+            "PATH", "LANG", "TZ", "SSL_CERT_FILE",
             # The Codex CLI itself needs the host's egress proxy, if any;
             # without it a proxied host cannot reach OpenAI at all.
             "HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "NO_PROXY",
