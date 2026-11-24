@@ -1,5 +1,5 @@
 async def ping(interaction):
-    await interaction.response.send_message("pong")
+    await interaction.response.send_message("pong", ephemeral=True)
 
 
 def setup(registry):
