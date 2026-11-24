@@ -328,3 +328,21 @@ def test_unused_retrieved_sources_are_dropped():
     assert used_sources(answer, [gmail, other, server_wiki]) == [gmail, server_wiki]
     assert used_sources("`invalid option -- 'e'` だった", [gmail, other]) == []
     assert used_sources("https://discord.com/channels/1/2/3 見て", [other]) == []
+
+
+def test_history_replays_the_exact_sent_turn_so_requests_stay_prefix_stable():
+    # Prompt caching needs each request to extend the previous one byte
+    # for byte. The history used to store the raw user text while the
+    # request had actually sent the JSON-wrapped payload, so the shared
+    # prefix ended at the system message.
+    client, sent = client_for(message("first answer"), message("second answer"))
+    ai = Assistant(client, "test", SandboxSettings(), run_command_enabled=False)
+    names = {"username": "kokura", "display_name": "kokura", "server_nickname": None}
+    asyncio.run(ai.reply(1, "質問1", member_id=20, speaker_names=names))
+    asyncio.run(ai.reply(1, "質問2", member_id=20, speaker_names=names))
+    first, second = sent[0]["messages"], sent[1]["messages"]
+    assert second[: len(first)] == first
+    assert second[len(first)] == {"role": "assistant", "content": "first answer"}
+    stored_user, _ = ai.history[1][0]
+    assert stored_user == first[-1]["content"]
+    assert stored_user != "質問1"  # the sent JSON payload, not the raw text

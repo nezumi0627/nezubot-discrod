@@ -540,3 +540,28 @@ def test_resolve_people_decorated_bot_name_by_short_token(archive):
     # Unrelated tokens and partial-word traps still resolve nobody.
     assert resolve_people(archive, [10], "eventについて", 999) == []
     assert resolve_people(archive, [10], "maliceについて", 999) == []
+
+
+def test_resolve_people_seed_grounds_a_demonstrative(archive):
+    question = "この人物の過去のメッセージさがして"
+    # The text alone names nobody: no mention, no self reference, no alias.
+    assert resolve_people(archive, [10], question, 999) == []
+    # The conversation layer's grounded person is trusted as the referent.
+    assert resolve_people(archive, [10], question, 999, seed="20") == ["20"]
+
+
+def test_resolve_people_seed_falls_through_when_unusable(archive):
+    # Author 21 has no in-scope messages: fall through to text resolution.
+    assert resolve_people(archive, [10], "この人物について", 999, seed="21") == []
+    # A seed equal to the caller is not a referent.
+    assert resolve_people(archive, [10], "この人物について", 20, seed="20") == []
+
+
+def test_pre_retrieve_seed_delivers_that_persons_evidence(archive):
+    log = LogTools(archive, [10, 11, 12], caller_id=999)
+    question = "この人物の過去のメッセージさがして"
+    unseeded = asyncio.run(pre_retrieve(log, question, timeout=5))
+    assert "Speaker overview" not in unseeded
+    seeded = asyncio.run(pre_retrieve(log, question, seed_person="20", timeout=5))
+    assert "Speaker overview" in seeded
+    assert seeded.sources

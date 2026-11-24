@@ -11,6 +11,7 @@ from nezubot_discrod.ambient import skip_answer
 from nezubot_discrod.assistant import Assistant
 from nezubot_discrod.bot import Bot
 from nezubot_discrod.config import SandboxSettings
+from nezubot_discrod.conversation import LABEL
 from nezubot_discrod.prompts import AMBIENT_GUIDANCE
 
 
@@ -101,7 +102,14 @@ def test_mention_or_reply_to_bot_is_answered(trigger):
         msg.mentions = [msg.guild.me]
     else:
         msg.reference = SimpleNamespace(
-            message_id=1, resolved=SimpleNamespace(author=SimpleNamespace(id=99)),
+            message_id=1,
+            resolved=SimpleNamespace(
+                id=1,
+                author=SimpleNamespace(
+                    id=99, name="nezubot-discrod", display_name="nezubot-discrod"
+                ),
+                content="前の回答",
+            ),
         )
     bot = bot_for(msg)
     with (
@@ -110,8 +118,8 @@ def test_mention_or_reply_to_bot_is_answered(trigger):
     ):
         asyncio.run(Bot.on_message(bot, msg))
     audience.assert_called_once_with(bot, msg.channel, [10, 11])
-    bot.assistant.reply.assert_awaited_once_with(
-        10, msg.content, member_id=20, guild_id=123,
+    expected = dict(
+        member_id=20, guild_id=123,
         guild_info={
             "name": None,
             "owner": {"id": None, "display_name": None},
@@ -122,6 +130,15 @@ def test_mention_or_reply_to_bot_is_answered(trigger):
         retrieval_channel_ids=[10], message_id=42,
         speaker_names={"username": None, "display_name": None, "server_nickname": None},
     )
+    if trigger == "reply":
+        # The reply target is handed to the assistant as conversation context.
+        expected["conversation"] = {
+            "label": LABEL,
+            "reply_chain": [
+                {"author": "nezubot-discrod", "author_id": "99", "content": "前の回答"}
+            ],
+        }
+    bot.assistant.reply.assert_awaited_once_with(10, msg.content, **expected)
     msg.channel.send.assert_awaited_once_with("reply\n-# test")
 
 
