@@ -510,3 +510,18 @@ def test_provider_config(monkeypatch):
     monkeypatch.setenv("AI_PROVIDER", "invalid")
     with pytest.raises(ValueError, match="AI_PROVIDER"):
         Settings.from_env()
+
+
+def test_server_env_passes_timezone(monkeypatch, tmp_path):
+    # The app-server derives the model's "today" from its own local
+    # time; without TZ it falls back to the host zone (UTC here) and
+    # the date is a day behind Japan in the morning.
+    monkeypatch.setenv("TZ", "Asia/Tokyo")
+    env = CodexClient._server_env(tmp_path)
+    assert env["TZ"] == "Asia/Tokyo"
+
+
+def test_server_env_omits_timezone_when_unset(monkeypatch, tmp_path):
+    monkeypatch.delenv("TZ", raising=False)
+    env = CodexClient._server_env(tmp_path)
+    assert "TZ" not in env
