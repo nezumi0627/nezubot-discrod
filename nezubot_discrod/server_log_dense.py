@@ -2,14 +2,17 @@ import ctypes
 import hashlib
 import json
 import logging
+import os
+import pickle
 import re
 import sqlite3
 import unicodedata
 from collections import OrderedDict
 from contextlib import contextmanager
 from copy import copy
+from pathlib import Path
 from threading import Lock, Thread
-from time import monotonic, sleep
+from time import monotonic, sleep, time
 
 from nezubot_discrod.server_log import _date, embedding_text, text_hash
 from nezubot_discrod.server_log_timing import stage
@@ -137,6 +140,9 @@ class DenseIndex:
         self.aux_sequence = None
         self.aux_queries = OrderedDict()
         self.rebuilds = 0
+        self._disk_save_lock = Lock()
+        self._disk_save_at = 0.0
+        self._disk_save_sequence = None
         self.ids = {}
         self.matrix = None
         self.size = 0
@@ -423,37 +429,47 @@ class DenseIndex:
                     EXISTS (SELECT 1 FROM deleted_messages d WHERE d.id = m.id) AS tombstoned
                 FROM messages m LEFT JOIN message_vectors v ON v.message_id = m.id AND v.model = ?
             """
+        rebuilt = False
         if (self.sequence is None or self.model != self.store.model or static_changed
                 or self.snapshot_mode and self.size > max(1024, len(self.ids) * 2)):
-            self.ids.clear()
-            self.message_ids.clear()
-            self.sort_keys.clear()
-            self.versions.clear()
-            self.channel_codes.clear()
-            self.author_codes.clear()
-            self.channel_name_codes.clear()
-            self.size = 0
-            self.matrix = None
-            if static_model:
-                self.reserve_hint = db.execute(
-                    "SELECT count(*) FROM message_vectors WHERE model IN (?, ?)",
-                    (self.store.model, static_model),
-                ).fetchone()[0] + 1024
-            else:
-                self.reserve_hint = db.execute(
-                    "SELECT count(*) FROM message_vectors WHERE model = ?", (self.store.model,)
-                ).fetchone()[0] + 1024
-            self.pending.execute("DELETE FROM messages")
-            with self.query_cache_lock:
-                self.queries.clear()
-            self.model = self.store.model
-            self.static_model = static_model
-            self.rebuilds += 1
-            rows = db.execute(select + " ORDER BY m.channel_id, m.created_at, m.id",
-                              self._select_params(static_model))
-            while batch := rows.fetchmany(512):
-                self._load(batch)
-        elif sequence != self.sequence:
+            restored = (
+                self.sequence is None
+                and self.model == self.store.model
+                and not static_changed
+                and self._restore_disk_cache()
+            )
+            if not restored:
+                rebuilt = True
+                self.ids.clear()
+                self.message_ids.clear()
+                self.sort_keys.clear()
+                self.versions.clear()
+                self.channel_codes.clear()
+                self.author_codes.clear()
+                self.channel_name_codes.clear()
+                self.size = 0
+                self.matrix = None
+                if static_model:
+                    self.reserve_hint = db.execute(
+                        "SELECT count(*) FROM message_vectors WHERE model IN (?, ?)",
+                        (self.store.model, static_model),
+                    ).fetchone()[0] + 1024
+                else:
+                    self.reserve_hint = db.execute(
+                        "SELECT count(*) FROM message_vectors WHERE model = ?",
+                        (self.store.model,),
+                    ).fetchone()[0] + 1024
+                self.pending.execute("DELETE FROM messages")
+                with self.query_cache_lock:
+                    self.queries.clear()
+                self.model = self.store.model
+                self.static_model = static_model
+                self.rebuilds += 1
+                rows = db.execute(select + " ORDER BY m.channel_id, m.created_at, m.id",
+                                  self._select_params(static_model))
+                while batch := rows.fetchmany(512):
+                    self._load(batch)
+        if not rebuilt and sequence != self.sequence:
             changed = [row[0] for row in db.execute(
                 "SELECT message_id FROM dense_changes WHERE version > ?", (self.sequence,)
             )]
@@ -469,6 +485,318 @@ class DenseIndex:
                 ))
         self.pending.commit()
         self.sequence = sequence
+        return True
+
+    # -- On-disk snapshot cache -------------------------------------------
+    # A full snapshot build scans every stored vector (minutes under
+    # load), which left dense search unavailable after every restart.
+    # The published snapshot is therefore also written to a cache
+    # directory next to the database; on the first sync of a new
+    # process the index is restored from it in seconds and the normal
+    # incremental dense_changes catch-up takes it from the saved
+    # sequence to the current one. The cache is strictly best-effort:
+    # any format, model or integrity mismatch falls back to the full
+    # rebuild, and per-message version validation at search time still
+    # filters entries that changed after the save.
+    _DISK_FORMAT = 1
+    _DISK_SAVE_MIN_INTERVAL = 600.0
+    _DISK_SAVE_MIN_CHANGES = 20000
+
+    def _disk_cache_dir(self):
+        path = getattr(self.store, "path", None)
+        if path is None:
+            return None
+        path = Path(path)
+        return path.parent / (path.name + ".dense-cache")
+
+    def _maybe_save_disk_cache(self, snapshot):
+        if snapshot is None or snapshot.sequence is None or not snapshot.size:
+            return
+        last = self._disk_save_sequence
+        if last is not None:
+            if snapshot.sequence == last:
+                return
+            if (
+                snapshot.sequence - last < self._DISK_SAVE_MIN_CHANGES
+                and monotonic() - self._disk_save_at < self._DISK_SAVE_MIN_INTERVAL
+            ):
+                return
+        if not self._disk_save_lock.acquire(blocking=False):
+            return
+        try:
+            self._save_disk_cache(snapshot)
+            self._disk_save_sequence = snapshot.sequence
+            self._disk_save_at = monotonic()
+        except Exception:
+            logger.warning("Dense snapshot disk save failed", exc_info=True)
+        finally:
+            self._disk_save_lock.release()
+
+    def _save_disk_cache(self, snap):
+        np = self.np
+        directory = self._disk_cache_dir()
+        if directory is None:
+            return
+        directory.mkdir(mode=0o700, parents=True, exist_ok=True)
+        lock_path = directory / "save.lock"
+        try:
+            fd = os.open(lock_path, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
+        except FileExistsError:
+            # Another process is saving (or died mid-save): only a stale
+            # lock may be taken over.
+            try:
+                if time() - lock_path.stat().st_mtime < 900:
+                    return
+                lock_path.unlink()
+                fd = os.open(lock_path, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
+            except (FileNotFoundError, FileExistsError):
+                return
+        os.close(fd)
+        tmp = directory / f".tmp-{os.getpid()}"
+        try:
+            tmp.mkdir(mode=0o700, exist_ok=True)
+            names = []
+
+            def put_array(name, array):
+                with open(tmp / name, "wb") as handle:
+                    np.save(handle, array, allow_pickle=False)
+                names.append(name)
+
+            put_array("matrix.npy", snap.matrix[:snap.size])
+            put_array("channels.npy", snap.channels[:snap.size])
+            put_array("authors.npy", snap.authors[:snap.size])
+            put_array("channel_names.npy", snap.channel_names[:snap.size])
+            put_array("dates.npy", snap.dates[:snap.size])
+            put_array("active.npy", snap.active[:snap.size])
+            aux = snap.aux_model is not None and snap.aux_matrix is not None \
+                and snap.aux_size > 0
+            if aux:
+                put_array("aux_matrix.npy", snap.aux_matrix[:snap.aux_size])
+                put_array("aux_channels.npy", snap.aux_channels[:snap.aux_size])
+                put_array("aux_authors.npy", snap.aux_authors[:snap.aux_size])
+                put_array("aux_channel_names.npy",
+                          snap.aux_channel_names[:snap.aux_size])
+                put_array("aux_dates.npy", snap.aux_dates[:snap.aux_size])
+                put_array("aux_active.npy", snap.aux_active[:snap.aux_size])
+            lists = {
+                "message_ids": snap.message_ids,
+                "versions": snap.versions,
+                "aux_message_ids": snap.aux_message_ids if aux else [],
+                "aux_versions": snap.aux_versions if aux else [],
+                "channel_codes": snap.channel_codes,
+                "author_codes": snap.author_codes,
+                "channel_name_codes": snap.channel_name_codes,
+                "pending_rows": [
+                    tuple(row) for row in snap.pending.execute(
+                        "SELECT id, channel_id, channel_name, author_id, "
+                        "author_name, created_at, deleted FROM messages"
+                    )
+                ],
+                "pending_deleted": [
+                    row[0] for row in snap.pending.execute(
+                        "SELECT id FROM deleted_messages"
+                    )
+                ],
+            }
+            with open(tmp / "lists.pkl", "wb") as handle:
+                pickle.dump(lists, handle, protocol=4)
+            names.append("lists.pkl")
+            files = {}
+            for name in names:
+                target = tmp / name
+                digest = hashlib.sha256()
+                with open(target, "rb") as handle:
+                    while chunk := handle.read(1 << 23):
+                        digest.update(chunk)
+                files[name] = {
+                    "sha256": digest.hexdigest(),
+                    "bytes": target.stat().st_size,
+                }
+            meta = {
+                "format": self._DISK_FORMAT,
+                "model": snap.model,
+                "static_model": snap.static_model,
+                "aux_model": snap.aux_model if aux else None,
+                "sequence": snap.sequence,
+                "size": snap.size,
+                "aux_size": snap.aux_size if aux else 0,
+                "dimensions": int(snap.matrix.shape[1]),
+                "aux_dimensions": int(snap.aux_matrix.shape[1]) if aux else 0,
+                "saved_at": time(),
+                "files": files,
+            }
+            with open(tmp / "meta.json", "w") as handle:
+                json.dump(meta, handle)
+            # Data files first, meta last: a reader that sees the new
+            # meta with old data (or vice versa) fails the hash check
+            # and rebuilds instead of trusting a torn cache.
+            for name in names:
+                os.replace(tmp / name, directory / name)
+            os.replace(tmp / "meta.json", directory / "meta.json")
+        finally:
+            try:
+                tmp.rmdir()
+            except OSError:
+                pass
+            try:
+                lock_path.unlink()
+            except FileNotFoundError:
+                pass
+
+    def _restore_disk_cache(self):
+        """Populate this index from the on-disk cache. False on any
+        mismatch or corruption; the caller then does the full rebuild."""
+        np = self.np
+        directory = self._disk_cache_dir()
+        if directory is None:
+            return False
+        try:
+            meta = json.loads((directory / "meta.json").read_text())
+            if meta.get("format") != self._DISK_FORMAT:
+                return False
+            if meta.get("model") != self.store.model:
+                return False
+            if meta.get("static_model") != getattr(self.store, "static_model", None):
+                return False
+            if meta.get("aux_model") is not None \
+                    and meta.get("aux_model") != self.aux_model:
+                return False
+            for name, info in meta["files"].items():
+                target = directory / name
+                if target.stat().st_size != info["bytes"]:
+                    return False
+                digest = hashlib.sha256()
+                with open(target, "rb") as handle:
+                    while chunk := handle.read(1 << 23):
+                        digest.update(chunk)
+                if digest.hexdigest() != info["sha256"]:
+                    return False
+
+            def load(name):
+                with open(directory / name, "rb") as handle:
+                    return np.load(handle, allow_pickle=False)
+
+            size = int(meta["size"])
+            matrix = load("matrix.npy")
+            channels = load("channels.npy")
+            authors = load("authors.npy")
+            channel_names = load("channel_names.npy")
+            dates = load("dates.npy")
+            active = load("active.npy")
+            if matrix.shape != (size, int(meta["dimensions"])):
+                return False
+            if not (len(channels) == len(authors) == len(channel_names)
+                    == len(dates) == len(active) == size):
+                return False
+            with open(directory / "lists.pkl", "rb") as handle:
+                lists = pickle.load(handle)  # noqa: S301 - own private cache file
+            message_ids = [str(value) for value in lists["message_ids"]]
+            versions = list(lists["versions"])
+            if len(message_ids) != size or len(versions) != size:
+                return False
+            channel_codes = {str(k): int(v) for k, v in lists["channel_codes"].items()}
+            author_codes = {str(k): int(v) for k, v in lists["author_codes"].items()}
+            channel_name_codes = {
+                str(k): int(v) for k, v in lists["channel_name_codes"].items()
+            }
+            inverse_channels = {code: cid for cid, code in channel_codes.items()}
+            sort_keys = [
+                (
+                    inverse_channels[int(channels[i])],
+                    dates[i].decode("ascii"),
+                    message_ids[i],
+                )
+                for i in range(size)
+            ]
+            aux_size = int(meta["aux_size"])
+            aux_state = None
+            if aux_size and self.aux_model is not None:
+                aux_matrix = load("aux_matrix.npy")
+                aux_channels = load("aux_channels.npy")
+                aux_authors = load("aux_authors.npy")
+                aux_channel_names = load("aux_channel_names.npy")
+                aux_dates = load("aux_dates.npy")
+                aux_active = load("aux_active.npy")
+                if aux_matrix.shape != (aux_size, int(meta["aux_dimensions"])):
+                    return False
+                if not (len(aux_channels) == len(aux_authors)
+                        == len(aux_channel_names) == len(aux_dates)
+                        == len(aux_active) == aux_size):
+                    return False
+                aux_message_ids = [str(v) for v in lists["aux_message_ids"]]
+                aux_versions = list(lists["aux_versions"])
+                if len(aux_message_ids) != aux_size or len(aux_versions) != aux_size:
+                    return False
+                aux_sort_keys = [
+                    (
+                        inverse_channels[int(aux_channels[i])],
+                        aux_dates[i].decode("ascii"),
+                        aux_message_ids[i],
+                    )
+                    for i in range(aux_size)
+                ]
+                aux_state = (
+                    aux_matrix, aux_channels, aux_authors, aux_channel_names,
+                    aux_dates, aux_active, aux_message_ids, aux_versions,
+                    aux_sort_keys,
+                )
+        except Exception:
+            logger.warning(
+                "Dense snapshot disk cache unusable; rebuilding", exc_info=True
+            )
+            return False
+        self.matrix = np.array(matrix, dtype=np.float32)
+        self.channels = np.array(channels, dtype=np.int32)
+        self.authors = np.array(authors, dtype=np.int32)
+        self.channel_names = np.array(channel_names, dtype=np.int32)
+        self.dates = np.array(dates, dtype="S32")
+        self.active = np.array(active, dtype=bool)
+        self.size = size
+        self.ids = {message_id: i for i, message_id in enumerate(message_ids)}
+        self.message_ids = message_ids
+        self.versions = versions
+        self.sort_keys = sort_keys
+        self.channel_codes = channel_codes
+        self.author_codes = author_codes
+        self.channel_name_codes = channel_name_codes
+        self.model = self.store.model
+        self.static_model = getattr(self.store, "static_model", None)
+        self.sequence = int(meta["sequence"])
+        self.pending.execute("DELETE FROM messages")
+        self.pending.execute("DELETE FROM deleted_messages")
+        self.pending.executemany(
+            "INSERT OR REPLACE INTO messages VALUES (?, ?, ?, ?, ?, ?, ?)",
+            [tuple(row) for row in lists["pending_rows"]],
+        )
+        self.pending.executemany(
+            "INSERT OR IGNORE INTO deleted_messages VALUES (?)",
+            [(value,) for value in lists["pending_deleted"]],
+        )
+        self.pending.commit()
+        if aux_state is not None:
+            (
+                aux_matrix, aux_channels, aux_authors, aux_channel_names,
+                aux_dates, aux_active, aux_message_ids, aux_versions,
+                aux_sort_keys,
+            ) = aux_state
+            self.aux_matrix = np.array(aux_matrix, dtype=np.float32)
+            self.aux_channels = np.array(aux_channels, dtype=np.int32)
+            self.aux_authors = np.array(aux_authors, dtype=np.int32)
+            self.aux_channel_names = np.array(aux_channel_names, dtype=np.int32)
+            self.aux_dates = np.array(aux_dates, dtype="S32")
+            self.aux_active = np.array(aux_active, dtype=bool)
+            self.aux_size = aux_size
+            self.aux_ids = {
+                message_id: i for i, message_id in enumerate(aux_message_ids)
+            }
+            self.aux_message_ids = aux_message_ids
+            self.aux_versions = aux_versions
+            self.aux_sort_keys = aux_sort_keys
+            self.aux_sequence = int(meta["sequence"])
+        logger.info(
+            "Dense snapshot restored from disk cache: %d vectors at sequence %d",
+            size, self.sequence,
+        )
         return True
 
     def _query_vector(self, query):
@@ -770,6 +1098,7 @@ class DenseIndex:
             snapshot.pending = sqlite3.connect(":memory:", check_same_thread=False)
             self.pending.backup(snapshot.pending)
             self.snapshot = snapshot
+            self._maybe_save_disk_cache(snapshot)
 
     def request_refresh(self):
         self.snapshot_mode = True

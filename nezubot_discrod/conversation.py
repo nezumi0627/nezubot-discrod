@@ -10,7 +10,9 @@ of the channel's latest messages, and — when the call refers to a person
 without naming anyone — the person the referent grounds to, resolved in
 that priority order: (1) the replied-to message's author, (2) a mentioned
 person (left to resolve_people, which reads the mention from the text),
-(3) the most recent other speaker in the transcript. The grounded person
+(3) the person the transcript is discussing most (replies received and
+mentions outweigh plain authorship), (4) the most recent other speaker
+in the transcript. The grounded person
 is passed to pre_retrieve as a seed so author evidence is fetched for the
 right person. Everything is best-effort: any Discord failure degrades to
 less context, never to a failed answer.
@@ -155,9 +157,12 @@ def _ground(anchor, chain, history_messages, bot_id, speaker_id):
 
     An explicit @-mention in the call text is left to resolve_people.
     Grounding only fires on a demonstrative (この人物/この人…), or on a
-    search-style request attached to a reply; the referent is then the
-    replied-to author, else the most recent other speaker. The speaker
-    and the bot itself are never grounded to."""
+    search-style request attached to a reply; the referent is then, in
+    order: the replied-to author, the author of the message the call
+    replies to when that message sits in the transcript window (the
+    reply chain itself sometimes cannot be fetched), the person the
+    transcript is discussing most, and finally the most recent other
+    speaker. The speaker and the bot itself are never grounded to."""
     text = str(getattr(anchor, "content", "") or "")
     mentioned = [
         user for user in getattr(anchor, "mentions", None) or []
@@ -172,21 +177,73 @@ def _ground(anchor, chain, history_messages, bot_id, speaker_id):
     def eligible(user):
         return user is not None and getattr(user, "id", None) not in (bot_id, speaker_id)
 
-    if chain and eligible(chain[0].author):
-        author = chain[0].author
+    def grounded(user, basis):
         return {
-            "id": str(author.id),
-            "display_name": _display(author),
-            "basis": "reply_target",
+            "id": str(user.id),
+            "display_name": _display(user),
+            "basis": basis,
         }
+
+    if chain and eligible(chain[0].author):
+        return grounded(chain[0].author, "reply_target")
+    by_id = {}
+    for item in (*history_messages, *chain):
+        by_id[getattr(item, "id", None)] = item
+    reference = getattr(anchor, "reference", None)
+    target_id = getattr(reference, "message_id", None) if reference else None
+    target = by_id.get(target_id)
+    if target is not None and eligible(target.author):
+        return grounded(target.author, "reply_target")
+    discussed = _most_discussed(history_messages, by_id, bot_id, speaker_id)
+    if discussed is not None:
+        return grounded(discussed, "discussed_in_transcript")
     for item in reversed(history_messages):
         if eligible(item.author):
-            return {
-                "id": str(item.author.id),
-                "display_name": _display(item.author),
-                "basis": "recent_speaker",
-            }
+            return grounded(item.author, "recent_speaker")
     return None
+
+
+def _most_discussed(history_messages, by_id, bot_id, speaker_id):
+    """The person the transcript is about, when one clearly is: replies
+    received weigh most (a post the channel is reacting to), then
+    @-mentions and display-name mentions by other speakers, then plain
+    authorship. Returns None unless someone stands out (a reply or a
+    mention), so plain chatter keeps the recent-speaker fallback."""
+    scores = {}
+    last_seen = {}
+
+    def bump(user, points, position):
+        if user is None or getattr(user, "id", None) in (bot_id, speaker_id):
+            return
+        key = user.id
+        entry = scores.setdefault(key, [0, user])
+        entry[0] += points
+        last_seen[key] = position
+
+    for position, item in enumerate(history_messages):
+        author = getattr(item, "author", None)
+        bump(author, 1, position)
+        reference = getattr(item, "reference", None)
+        target_id = getattr(reference, "message_id", None) if reference else None
+        target = by_id.get(target_id)
+        if target is not None and getattr(target, "author", None) is not author:
+            bump(target.author, 3, position)
+        content = str(getattr(item, "content", "") or "")
+        for user in getattr(item, "mentions", None) or []:
+            if user is not author:
+                bump(user, 2, position)
+        for other in list(scores.values()):
+            user = other[1]
+            if user is not author and _display(user) in content:
+                bump(user, 2, position)
+    best = None
+    for key, (score, user) in scores.items():
+        if score < 3:
+            continue
+        rank = (score, last_seen.get(key, -1))
+        if best is None or rank > best[0]:
+            best = (rank, user)
+    return best[1] if best is not None else None
 
 
 async def build_conversation_context(message, bot_id):

@@ -31,20 +31,32 @@ _DENSE_SLOTS = BoundedSemaphore(2)
 _WIKI_SLOTS = BoundedSemaphore(2)
 _MEMBER_WIKI_SLOTS = BoundedSemaphore(2)
 _SELF = re.compile(
-    r"(?:おれ|俺|わたし|私|自分|僕|ぼく)(?:の|について|は|が|を|に|$)|"
+    r"(?:おれ|俺|わたし|私|自分|僕|ぼく|うち)(?:の|について|は|が|を|に|と|とか|って|$)|"
     r"\b(?:me|my|myself)\b", re.IGNORECASE,
 )
+
+
+def _alias_core(alias):
+    """The bare name inside a decorated display name: bracketed segments
+    (【…】, […], （…）) removed, any ``#suffix`` (さくら#abcd) cut, and a
+    trailing honorific dropped. People refer to each other by the core,
+    so the primary alias match tries it alongside the full alias."""
+    core = re.sub(r"【[^】]*】|\[[^\]]*\]|[(（][^)）]*[)）]", "", alias)
+    core = re.split(r"[#＃]", core, maxsplit=1)[0].strip()
+    core = re.sub(r"(?:ちゃん|くん|さん|氏|さま)$", "", core).strip()
+    return core
 
 
 class _AliasSnapshot:
     """Distinct (normalized, author_id) alias pairs for one channel set,
     with the fallback token keys computed lazily on first use."""
 
-    __slots__ = ("rows", "_keys")
+    __slots__ = ("rows", "_keys", "_cores")
 
     def __init__(self, rows):
         self.rows = [(normalized, author_id) for normalized, author_id in rows]
         self._keys = None
+        self._cores = None
 
     def token_keys(self):
         if self._keys is None:
@@ -56,6 +68,18 @@ class _AliasSnapshot:
                 keys.append(by_alias[normalized])
             self._keys = keys
         return self._keys
+
+    def core_names(self):
+        if self._cores is None:
+            by_alias = {}
+            cores = []
+            for normalized, _ in self.rows:
+                if normalized not in by_alias:
+                    core = _alias_core(normalized)
+                    by_alias[normalized] = core if core != normalized else None
+                cores.append(by_alias[normalized])
+            self._cores = cores
+        return self._cores
 
 
 def _alias_snapshot(store, channel_ids, db):
@@ -100,7 +124,28 @@ def _existing_authors(db, where, args, author_ids, *, non_bot):
     return found
 
 
-def resolve_people(store, channel_ids, text, caller_id, message_id=None, seed=None):
+def _dominant_author(db, where, args, author_ids):
+    """One author whose in-scope volume dwarfs the same-name others
+    (the main さくら#abcd account has 15x the messages of the next
+    bridge account): the name then means that author, not an ambiguity.
+    Requires a clear margin so genuinely shared names stay ambiguous."""
+    ids = [str(author) for author in author_ids]
+    rows = db.execute(
+        f"SELECT author_id, count(*) AS total FROM messages m WHERE {where} "
+        f"AND author_id IN ({','.join('?' for _ in ids)}) "
+        "GROUP BY author_id ORDER BY total DESC",
+        [*args, *ids],
+    ).fetchall()
+    if len(rows) < 2:
+        return None
+    top, second = rows[0], rows[1]
+    if top[1] >= 50 and top[1] >= 5 * second[1]:
+        return top[0]
+    return None
+
+
+def resolve_people(store, channel_ids, text, caller_id, message_id=None, seed=None,
+                   carryover=None):
     if not channel_ids:
         return []
     where, args = store._scope(channel_ids, exclude_message_id=message_id)
@@ -122,20 +167,51 @@ def resolve_people(store, channel_ids, text, caller_id, message_id=None, seed=No
             return [str(caller_id)]
         normalized = unicodedata.normalize("NFKC", text).casefold()
         snapshot = _alias_snapshot(store, channel_ids, db)
-        candidates = set()
-        for alias, author_id in snapshot.rows:
-            if len(alias) < 2 or alias not in normalized:
-                continue
-            pattern = re.escape(alias)
-            if alias.isascii():
-                pattern = r"(?<![a-z0-9_])" + pattern + r"(?![a-z0-9_])"
-            if re.search(pattern, normalized):
-                candidates.add(author_id)
-        if candidates:
-            ids = _existing_authors(db, where, args, candidates, non_bot=True)
-            if ids:
-                return sorted(ids)
-        return _token_fallback_people(db, snapshot, where, args, normalized)
+        # Group matches by the name that hit (full alias or its decorated
+        # core): when one name maps to several people and the caller is
+        # among them, the caller means themselves, so that name resolves
+        # to the caller alone instead of going ambiguous.
+        matched = {}
+        cores = snapshot.core_names()
+        for (alias, author_id), core in zip(snapshot.rows, cores, strict=True):
+            for form in (alias, core):
+                if form is None or len(form) < 2 or form not in normalized:
+                    continue
+                pattern = re.escape(form)
+                if form.isascii():
+                    pattern = r"(?<![a-z0-9_])" + pattern + r"(?![a-z0-9_])"
+                if re.search(pattern, normalized):
+                    matched.setdefault(form, set()).add(author_id)
+                    break
+        resolved = set()
+        for form_ids in matched.values():
+            if caller_id is not None and str(caller_id) in form_ids and len(form_ids) > 1:
+                form_ids = {str(caller_id)}
+            existing = _existing_authors(db, where, args, form_ids, non_bot=True)
+            if not existing:
+                # The name may belong only to bot/bridge accounts (the
+                # decorated さくら#abcd accounts are all webhooks);
+                # the token fallback already resolves bot authors for
+                # ASCII names, so do the same here before giving up.
+                existing = _existing_authors(db, where, args, form_ids, non_bot=False)
+            if len(existing) > 1:
+                dominant = _dominant_author(db, where, args, existing)
+                if dominant is not None:
+                    existing = {dominant}
+            resolved.update(existing)
+        if resolved:
+            return sorted(resolved)
+        fallback = _token_fallback_people(db, snapshot, where, args, normalized)
+        if fallback:
+            return fallback
+        if carryover is not None:
+            # A follow-up with no person signal of its own (どこ住み？
+            # after asking about someone) continues the previous turn's
+            # subject; the caller supplies the person that turn settled
+            # on. Only used when nothing in the text resolved at all.
+            if _existing_authors(db, where, args, [str(carryover)], non_bot=False):
+                return [str(carryover)]
+        return []
 
 
 def _alias_token_keys(alias):
@@ -284,7 +360,7 @@ def _event_chunks(log, candidates, message_id):
 
 
 async def pre_retrieve(log, text, *, member_wiki=None, guild_id=None, message_id=None,
-                       seed_person=None, timeout=0.85, budget=6000):
+                       seed_person=None, carryover_person=None, timeout=0.85, budget=6000):
     """Add person history and Server Wiki; private member-wiki excerpts are caller-only."""
     started = perf_counter()
     timings = Timings()
@@ -295,6 +371,9 @@ async def pre_retrieve(log, text, *, member_wiki=None, guild_id=None, message_id
     skipped = []
     failures = []
     people = []
+    # The hybrid (aux) path is enabled only while grounding has not
+    # settled on anyone; work() closes the gate once people resolve.
+    hybrid_gate = {"allow": True}
 
     def publish(kind, chunk):
         if chunk and not stopped.is_set():
@@ -307,7 +386,8 @@ async def pre_retrieve(log, text, *, member_wiki=None, guild_id=None, message_id
                                         author=author, limit=limit, require_dense=not lexical_only,
                                         infer_author=author is not None,
                                         exclude_message_id=message_id,
-                                        lexical_only=lexical_only, snapshot_only=not lexical_only)
+                                        lexical_only=lexical_only, snapshot_only=not lexical_only,
+                                        allow_hybrid=hybrid_gate["allow"])
             except DenseSnapshotUnavailable:
                 skipped.append("dense_snapshot")
                 return
@@ -362,7 +442,10 @@ async def pre_retrieve(log, text, *, member_wiki=None, guild_id=None, message_id
         lexical = asyncio.create_task(run("lexical_fallback", search, None, 8, True))
         try:
             people = await run("people", resolve_people, log.store, log.channel_ids,
-                               text, log.caller_id, message_id, seed_person) or []
+                               text, log.caller_id, message_id, seed_person,
+                               carryover_person) or []
+            if people:
+                hybrid_gate["allow"] = False
             jobs = [lexical]
             if log.store._dense is not None:
                 jobs.append(run("dense", dense_search, people, dense=True))
@@ -441,6 +524,7 @@ async def pre_retrieve(log, text, *, member_wiki=None, guild_id=None, message_id
         "stages_ms": values, "active": active, "skipped": skipped,
         "errors": list(failures),
         "chunks": counts, "chars": len(result), "sources": len(sources),
+        "people": [str(person) for person in people],
     }
     logger.info("Automatic retrieval %s", json.dumps(result.diagnostics, sort_keys=True))
     if status == "cancelled":

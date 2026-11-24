@@ -14,6 +14,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 from threading import Event, Lock, Thread
+from time import perf_counter
 
 from dotenv import load_dotenv
 
@@ -276,6 +277,16 @@ class ServerLog:
         )
         self._hybrid_embedder = hybrid_embedder
         self._hybrid_dense = None
+        # Soft deadline for the lexical (FTS) stage of a search, in
+        # milliseconds. The FTS stage runs as a sequence of small token
+        # chunks under a SQLite progress handler; once the budget is spent
+        # the rows gathered so far are returned instead of letting one
+        # stage eat the caller's whole deadline (under load a single
+        # full-expression scan could take seconds and starve the dense
+        # stage entirely). 0 disables chunking (one unbounded query).
+        self.lexical_deadline_ms = int(
+            os.getenv("SERVER_LOG_LEXICAL_DEADLINE_MS", "450")
+        )
         self.max_length = int(
             max_length if max_length is not None else os.getenv("SERVER_LOG_MAX_LENGTH", "128")
         )
@@ -696,7 +707,7 @@ class ServerLog:
         # the pool in narrow scopes.
         return db.execute(
             f"""
-            SELECT m.* FROM (
+            SELECT m.*, f.fts_rank FROM (
                 SELECT rowid, bm25(message_fts) AS fts_rank FROM message_fts
                 WHERE message_fts MATCH ? ORDER BY bm25(message_fts) LIMIT ?
             ) f JOIN messages m ON m.rowid = f.rowid
@@ -706,10 +717,64 @@ class ServerLog:
             [expression, max(200, pool * 4), *args, pool],
         ).fetchall()
 
-    def _lexical_rows(self, db, expression, where, args, pool):
+    # Token chunks per FTS subquery when the soft deadline is active:
+    # each chunk is one bm25 top-k scan, so a deadline abort loses only
+    # the chunks that never ran, not the whole stage.
+    _LEXICAL_CHUNK_TOKENS = 6
+
+    def _lexical_compute(self, db, tokens, where, args, pool):
+        def expression(chunk):
+            return " OR ".join(
+                '"' + token.replace('"', '""') + '"' for token in chunk
+            )
+
+        budget = self.lexical_deadline_ms / 1000.0
+        if budget <= 0 or len(tokens) <= self._LEXICAL_CHUNK_TOKENS:
+            return self._lexical_query(db, expression(tokens), where, args, pool)
+        deadline = perf_counter() + budget
+        db.set_progress_handler(lambda: 1 if perf_counter() > deadline else 0, 2000)
+        merged = {}
+        chunks = [
+            tokens[start:start + self._LEXICAL_CHUNK_TOKENS]
+            for start in range(0, len(tokens), self._LEXICAL_CHUNK_TOKENS)
+        ]
+        try:
+            for index, chunk in enumerate(chunks):
+                try:
+                    rows = self._lexical_query(
+                        db, expression(chunk), where, args, pool
+                    )
+                except sqlite3.OperationalError as error:
+                    if "interrupted" not in str(error).lower():
+                        raise
+                    # Soft deadline spent: keep the chunks that finished.
+                    # Partial lexical rows beat discarding the whole stage
+                    # (and with it, usually, the caller's dense stage too).
+                    logger.info(
+                        "Lexical stage soft deadline after %d/%d chunks; "
+                        "returning %d partial rows",
+                        index, len(chunks), len(merged),
+                    )
+                    break
+                for row in rows:
+                    current = merged.get(row["id"])
+                    if current is None or row["fts_rank"] < current["fts_rank"]:
+                        merged[row["id"]] = row
+                if perf_counter() > deadline:
+                    break
+        finally:
+            db.set_progress_handler(None, 0)
+        return sorted(
+            merged.values(), key=lambda row: (row["fts_rank"], row["id"])
+        )[:pool]
+
+    def _lexical_rows(self, db, tokens, where, args, pool):
         memo = LEXICAL_MEMO.get()
         if memo is None:
-            return self._lexical_query(db, expression, where, args, pool)
+            return self._lexical_compute(db, tokens, where, args, pool)
+        expression = " OR ".join(
+            '"' + token.replace('"', '""') + '"' for token in tokens
+        )
         key = (expression, where, tuple(args), pool)
         with memo["lock"]:
             entry = memo["entries"].get(key)
@@ -725,9 +790,9 @@ class ServerLog:
             entry["event"].wait()
             if entry["rows"] is not None:
                 return entry["rows"]
-            return self._lexical_query(db, expression, where, args, pool)
+            return self._lexical_compute(db, tokens, where, args, pool)
         try:
-            entry["rows"] = self._lexical_query(db, expression, where, args, pool)
+            entry["rows"] = self._lexical_compute(db, tokens, where, args, pool)
             return entry["rows"]
         finally:
             entry["event"].set()
@@ -735,7 +800,7 @@ class ServerLog:
     def search(
         self, query, *, channel_ids, author=None, channel=None, after=None, before=None, limit=10,
         require_dense=False, infer_author=True, exclude_message_id=None, lexical_only=False,
-        snapshot_only=False,
+        snapshot_only=False, allow_hybrid=True,
     ):
         if lexical_only and require_dense:
             raise ValueError("lexical_only and require_dense are mutually exclusive")
@@ -765,7 +830,6 @@ class ServerLog:
             tokens = sorted(set(bigrams(query)))
             if not tokens:
                 return []
-            expression = " OR ".join('"' + token.replace('"', '""') + '"' for token in tokens)
             dense = None
             reason = self._dense_state
             attempted = False
@@ -791,7 +855,7 @@ class ServerLog:
                             "No published dense snapshot candidates"
                         )
             with stage("lexical"):
-                lexical = self._lexical_rows(db, expression, where, args, pool)
+                lexical = self._lexical_rows(db, tokens, where, args, pool)
             if self._dense is not None and not lexical_only and not attempted:
                 reason = "no usable scoped vectors"
                 try:
@@ -820,7 +884,14 @@ class ServerLog:
             logger.info("Server log search mode=dense partial=%s coverage=%s",
                         getattr(dense, "partial", False), getattr(dense, "coverage", None))
             extra_dense = None
-            if self.hybrid_model and self._dense is not None:
+            # The hybrid (aux) path only earns its place when person
+            # grounding came up empty: measured on real questions, its
+            # gains were all in grounding-miss cases, while on scoped
+            # questions it dilutes the author-focused ranking. Callers
+            # that know the grounding outcome pass allow_hybrid=False;
+            # an author resolved here (explicit or inferred) counts as
+            # scoped too.
+            if allow_hybrid and author is None and self.hybrid_model and self._dense is not None:
                 try:
                     aux_search = (
                         self._dense.search_aux_snapshot if snapshot_only

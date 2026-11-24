@@ -137,7 +137,7 @@ async def show_prompt(interaction, settings):
         await interaction.followup.send(part, ephemeral=True)
 
 
-STATUS_CACHE_SECONDS = 60.0
+STATUS_CACHE_SECONDS = 600.0
 LIMIT_CACHE_SECONDS = 45.0
 LIMIT_FETCH_TIMEOUT = 45.0
 
@@ -171,20 +171,46 @@ async def show_help(interaction, bot):
         await interaction.followup.send(part, ephemeral=True)
 
 
-async def cached_status(bot):
-    cache = getattr(bot, "_status_cache", None)
-    now = time.monotonic()
-    if cache is not None and now - cache[0] < STATUS_CACHE_SECONDS:
-        return cache[1]
+async def _fetch_status(bot):
     server_log = bot.server_log
-    stats = await asyncio.to_thread(
+    return await asyncio.to_thread(
         collect_status,
         server_log.path,
         teacher_model=server_log.model,
         static_model=server_log.static_model,
         server_wiki_path=server_log.path.with_name("server_wiki.db"),
     )
-    bot._status_cache = (now, stats)
+
+
+async def _refresh_status(bot):
+    try:
+        stats = await _fetch_status(bot)
+        bot._status_cache = (time.monotonic(), stats)
+    except Exception:
+        logger.exception("/status: background stat refresh failed")
+    finally:
+        bot._status_refreshing = False
+
+
+async def cached_status(bot):
+    """Status stats with stale-while-revalidate caching.
+
+    collect_status reads the worker-maintained snapshot row, so a fetch
+    is normally milliseconds; the cache plus background refresh keep
+    even the fallback full aggregation off the /status path — a stale
+    value is served instantly while one background task recomputes.
+    """
+    cache = getattr(bot, "_status_cache", None)
+    now = time.monotonic()
+    if cache is not None:
+        if now - cache[0] < STATUS_CACHE_SECONDS:
+            return cache[1]
+        if not getattr(bot, "_status_refreshing", False):
+            bot._status_refreshing = True
+            asyncio.ensure_future(_refresh_status(bot))
+        return cache[1]
+    stats = await _fetch_status(bot)
+    bot._status_cache = (time.monotonic(), stats)
     return stats
 
 
@@ -292,6 +318,7 @@ class Bot(discord.Client):
         self.started_at = time.monotonic()
         self.answer_authors = OrderedDict()
         self._status_cache = None
+        self._status_refreshing = False
         self._limit_cache = None
         self.server_log = ServerLog(
             checkout=settings.self_checkout or None,
@@ -299,6 +326,7 @@ class Bot(discord.Client):
         )
         self.log_threads = {}
         self.backfill_task = None
+        self.warmup_task = None
         if settings.provider == "codex":
             self.ai_client = CodexClient(settings, run_command_enabled=run_command_enabled())
         else:
@@ -375,13 +403,40 @@ class Bot(discord.Client):
                     logger.info("Server log embedder off; a separate process owns embedding")
                 else:
                     self.server_log.start_embedder()
+            warmup = getattr(self, "warmup_task", None)
+            if hasattr(self, "_warmup_loop") and (warmup is None or warmup.done()):
+                self.warmup_task = asyncio.create_task(self._warmup_loop())
         guild = discord.Object(id=self.settings.guild_id)
         self.tree.copy_global_to(guild=guild)
         load_features(self.tree, self.settings.guild_id)
         commands = await self.tree.sync(guild=guild)
         logger.info("Synced %d slash commands to guild %s", len(commands), guild.id)
 
+    async def _warmup_loop(self):
+        """Keep the dense snapshot fresh and the archive's hot index
+        pages resident, so a question after a quiet period does not pay
+        a snapshot rebuild or a cold FTS scan inside its deadline."""
+        while True:
+            await asyncio.sleep(240)
+            try:
+                await asyncio.to_thread(self._warmup_once)
+            except Exception:
+                logger.warning("Server log warmup failed", exc_info=True)
+
+    def _warmup_once(self):
+        dense = getattr(self.server_log, "_dense", None)
+        if dense is not None:
+            dense.request_refresh()
+        with self.server_log.connect() as db:
+            db.execute(
+                "SELECT rowid FROM message_fts WHERE message_fts MATCH ? LIMIT 1",
+                ('"ねず"',),
+            ).fetchone()
+
     async def close(self):
+        if self.warmup_task is not None:
+            self.warmup_task.cancel()
+            await asyncio.gather(self.warmup_task, return_exceptions=True)
         if self.backfill_task is not None:
             self.backfill_task.cancel()
             await asyncio.gather(self.backfill_task, return_exceptions=True)
