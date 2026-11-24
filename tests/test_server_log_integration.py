@@ -184,6 +184,49 @@ def test_reply_trigger_with_uncached_message():
     assert asyncio.run(is_call(msg, user))
 
 
+def test_reply_trigger_with_authorless_resolved_reference():
+    # Discord sometimes delivers the reply target as a
+    # DeletedReferencedMessage, which carries no author even when the
+    # target message still exists. The trigger must fall back to one
+    # fetch instead of giving up on the payload alone.
+    user = SimpleNamespace(id=99)
+    msg = SimpleNamespace(
+        mentions=[],
+        reference=SimpleNamespace(
+            message_id=1, resolved=SimpleNamespace(id=1, channel_id=2),
+        ),
+        content="continue",
+        guild=SimpleNamespace(me=SimpleNamespace(display_name="Nezu")),
+        channel=SimpleNamespace(
+            fetch_message=AsyncMock(return_value=SimpleNamespace(author=user)),
+        ),
+    )
+    assert asyncio.run(is_call(msg, user))
+    msg.channel.fetch_message.return_value = SimpleNamespace(author=SimpleNamespace(id=100))
+    assert not asyncio.run(is_call(msg, user))
+    msg.channel.fetch_message.side_effect = discord.NotFound(Mock(status=404), "gone")
+    assert not asyncio.run(is_call(msg, user))
+
+
+def test_reply_to_another_user_is_decided_without_fetch():
+    # A resolved target with a readable author settles the question
+    # from the payload alone; no extra API fetch may happen.
+    user = SimpleNamespace(id=99)
+    fetch = AsyncMock(return_value=SimpleNamespace(author=user))
+    msg = SimpleNamespace(
+        mentions=[],
+        reference=SimpleNamespace(
+            message_id=1,
+            resolved=SimpleNamespace(author=SimpleNamespace(id=100)),
+        ),
+        content="continue",
+        guild=SimpleNamespace(me=SimpleNamespace(display_name="Nezu")),
+        channel=SimpleNamespace(fetch_message=fetch),
+    )
+    assert not asyncio.run(is_call(msg, user))
+    fetch.assert_not_awaited()
+
+
 def channel(number, *, visible=True, history=True):
     return SimpleNamespace(
         id=number,

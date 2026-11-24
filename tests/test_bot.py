@@ -123,6 +123,99 @@ def test_busy_gate_drops_message_silently(busy):
     bot.assistant.reply.assert_not_awaited()
 
 
+def _reply_setup(*, resolved, fetch_result=None):
+    """Bot fake plus a channel whose fetch_message resolves replies."""
+    user = SimpleNamespace(id=99)
+    channel = SimpleNamespace(
+        id=1,
+        send=AsyncMock(),
+        typing=Mock(side_effect=asyncio.Lock),
+        fetch_message=AsyncMock(return_value=fetch_result),
+    )
+    bot = SimpleNamespace(
+        settings=settings(),
+        user=user,
+        busy=set(),
+        slots=asyncio.Semaphore(4),
+        assistant=SimpleNamespace(reply=AsyncMock(return_value="reply")),
+        get_guild=Mock(return_value=None),
+        improvements=SimpleNamespace(settings=settings()),
+        improvement_tasks=set(),
+    )
+    message = SimpleNamespace(
+        author=SimpleNamespace(
+            id=456, bot=False, name="testuser", display_name="テストユーザー", nick=None,
+        ),
+        content="つづきを教えて",
+        guild=SimpleNamespace(id=123),
+        channel=channel,
+        mentions=[],
+        reference=SimpleNamespace(message_id=555, resolved=resolved),
+        id=1000,
+    )
+    return bot, channel, message
+
+
+def test_reply_to_bot_message_triggers_without_mention():
+    # A reply to the bot's own message is a call even with no @mention;
+    # the same path serves replies inside the bot's teaser threads,
+    # whose channels take the identical on_message route.
+    bot_user = SimpleNamespace(id=99)
+    target = SimpleNamespace(id=555, author=bot_user)
+    bot, channel, message = _reply_setup(resolved=target)
+    asyncio.run(Bot.on_message(bot, message))
+    bot.assistant.reply.assert_awaited_once()
+    args, kwargs = bot.assistant.reply.call_args
+    assert args[:2] == (1, "つづきを教えて")
+    assert kwargs["message_id"] == 1000
+    channel.send.assert_awaited_once()
+
+
+def test_reply_to_bot_message_triggers_when_reference_has_no_author():
+    # The gateway may attach an authorless DeletedReferencedMessage
+    # for a target that still exists; on_message must still trigger
+    # via the one-fetch fallback in is_call.
+    target = SimpleNamespace(id=555, author=SimpleNamespace(id=99))
+    bot, channel, message = _reply_setup(
+        resolved=SimpleNamespace(id=555), fetch_result=target,
+    )
+    asyncio.run(Bot.on_message(bot, message))
+    bot.assistant.reply.assert_awaited_once()
+    channel.fetch_message.assert_awaited_once_with(555)
+
+
+def test_reply_to_another_member_does_not_trigger():
+    target = SimpleNamespace(id=555, author=SimpleNamespace(id=777))
+    bot, channel, message = _reply_setup(resolved=target)
+    asyncio.run(Bot.on_message(bot, message))
+    bot.assistant.reply.assert_not_awaited()
+    channel.send.assert_not_awaited()
+
+
+def test_reply_to_bot_with_unfetchable_target_does_not_trigger():
+    import discord
+
+    bot, channel, message = _reply_setup(resolved=SimpleNamespace(id=555))
+    channel.fetch_message.side_effect = discord.NotFound(Mock(status=404), "gone")
+    asyncio.run(Bot.on_message(bot, message))
+    bot.assistant.reply.assert_not_awaited()
+    channel.send.assert_not_awaited()
+
+
+@pytest.mark.parametrize("author_id", [99, 555])
+def test_bot_authored_reply_never_triggers(author_id):
+    # Replies written by the bot itself or by another bot account are
+    # dropped by the author gate even when they reply to the bot.
+    target = SimpleNamespace(id=555, author=SimpleNamespace(id=99))
+    bot, channel, message = _reply_setup(resolved=target)
+    message.author = SimpleNamespace(
+        id=author_id, bot=True, name="bot", display_name="bot", nick=None,
+    )
+    asyncio.run(Bot.on_message(bot, message))
+    bot.assistant.reply.assert_not_awaited()
+    channel.send.assert_not_awaited()
+
+
 def _text_channel():
     import discord
 
