@@ -132,11 +132,12 @@ def test_mention_or_reply_to_bot_is_answered(trigger):
     )
     if trigger == "reply":
         # The reply target is handed to the assistant as conversation context.
+        entry = {"author": "nezubot-discrod", "author_id": "99", "message_id": "1",
+                 "content": "前の回答"}
         expected["conversation"] = {
             "label": LABEL,
-            "reply_chain": [
-                {"author": "nezubot-discrod", "author_id": "99", "content": "前の回答"}
-            ],
+            "reply_chain": [entry],
+            "reply_target": entry,
         }
     bot.assistant.reply.assert_awaited_once_with(10, msg.content, **expected)
     msg.channel.send.assert_awaited_once_with("reply\n-# test")

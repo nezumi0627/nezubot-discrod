@@ -628,3 +628,112 @@ def test_decorated_bot_accounts_resolve_to_dominant_author(archive):
         rows.append(value)
     archive.upsert_many(rows)
     assert resolve_people(archive, [10], "さくらについておしえて", 999) == ["31"]
+
+
+def test_pre_retrieve_route_budgets_are_reported(archive):
+    from nezubot_discrod.server_log_context import ROUTE_BUDGETS_MS
+
+    log = LogTools(archive, [10, 11, 12], caller_id=999)
+    plain = asyncio.run(pre_retrieve(log, "Rust history", timeout=5))
+    assert plain.diagnostics["budgets"] is False
+    assert plain.diagnostics["rewritten"] is False
+    assert plain.diagnostics["context_recall"] is False
+    budgeted = asyncio.run(pre_retrieve(
+        log, "Rust history", timeout=5, budgets=ROUTE_BUDGETS_MS,
+    ))
+    assert budgeted.diagnostics["budgets"] is True
+    assert budgeted.diagnostics["sources"] >= plain.diagnostics["sources"]
+
+
+def test_pre_retrieve_search_text_replaces_ranker_query(archive):
+    log = LogTools(archive, [10, 11, 12], caller_id=999)
+    # The demonstrative question alone matches nothing in the archive;
+    # the rewritten query carries the topic words that do.
+    raw = asyncio.run(pre_retrieve(log, "これどう思う？", timeout=5))
+    assert raw.diagnostics["sources"] == 0
+    rewritten = asyncio.run(pre_retrieve(
+        log, "これどう思う？", search_text="Rust history", timeout=5,
+    ))
+    assert rewritten.diagnostics["rewritten"] is True
+    assert rewritten.diagnostics["sources"] > 0
+    assert "Rust history" in rewritten
+
+
+def test_pre_retrieve_context_query_adds_context_chunk(tmp_path):
+    store = ServerLog(tmp_path / "logs" / "server_log.db", guild_id="100")
+    rows = []
+    for index in range(6):
+        value = record(1, channel="10", text=f"semantic topic {index}")
+        value["id"] = str(100 + index)
+        rows.append(value)
+    for index in range(6):
+        value = record(1, channel="10", text=f"plain archive {index}")
+        value["id"] = str(200 + index)
+        rows.append(value)
+    store.upsert_many(rows)
+    store = dense_store(store)
+    store.embed_pending()
+    store.enable_dense().refresh_snapshot()
+    log = LogTools(store, [10], caller_id=999)
+    # The fake embedder puts "semantic" texts on one axis and everything
+    # else on the other, so the question's own dense search lands on the
+    # semantic group while the context query surfaces the plain group —
+    # the context chunk must appear with messages dense never delivered.
+    result = asyncio.run(pre_retrieve(
+        log, "semantic これどう思う？", context_query="plain archive", timeout=5,
+    ))
+    assert result.diagnostics["context_recall"] is True
+    assert result.diagnostics["chunks"].get("context", 0) >= 1
+    assert "plain archive" in result
+
+
+def test_resolve_people_deadline_in_the_past_resolves_to_nobody(archive):
+    # A grounding budget that is already spent interrupts the SQL and
+    # degrades to no people instead of raising or overrunning.
+    assert resolve_people(
+        archive, [10], "aliceについて", 999, deadline=time.perf_counter() - 1,
+    ) == []
+    assert resolve_people(archive, [10], "aliceについて", 999) == ["20"]
+
+
+def test_assistant_persists_and_reuses_conversation_state(archive):
+    client, sent = client_for(message("分割すれば緩和できる"), message("了解"))
+    ai = Assistant(client, "test", SandboxSettings(), server_log=archive)
+    claim = "キャッシュを全件走査する時点でヒットしないキーが絶対に出て非効率だ"
+    conversation = {
+        "reply_chain": [
+            {"author": "ゆるふわモカ", "author_id": "302", "message_id": "90",
+             "content": claim},
+        ],
+        "reply_target": {
+            "author": "ゆるふわモカ", "author_id": "302", "message_id": "90",
+            "content": claim,
+        },
+        "mentions": [],
+        "transcript": "[21:51] ゆるふわモカ: " + claim,
+    }
+    asyncio.run(ai.reply(
+        10, "これ解決できないの", member_id=301, guild_id=100,
+        channel_ids=[10, 11, 12], conversation=conversation, message_id=100,
+        speaker_names={"display_name": "sora_server"},
+    ))
+    state = ai.conversation_states.load("10")
+    assert state is not None
+    assert state["active_subject"]["id"] == "90"
+    assert state["established_facts"][0]["message_id"] == "90"
+    assert state["established_facts"][0]["confirmed"] is False
+    assert state["attempted_solutions"][0]["text"] == "分割すれば緩和できる"
+    # The next turn's payload carries the state as structured fields.
+    asyncio.run(ai.reply(
+        10, "それ以外は？", member_id=301, guild_id=100,
+        channel_ids=[10, 11, 12],
+        conversation={"reply_chain": [], "mentions": [], "transcript": ""},
+        message_id=101, speaker_names={"display_name": "sora_server"},
+    ))
+    user_turns = [m for m in sent[1]["messages"] if m["role"] == "user"]
+    payload = json.loads(user_turns[-1]["content"])
+    assert payload["conversation"]["conversation_state"]["last_intent"] == "request_solution"
+    assert payload["conversation"]["active_topic"]["subject"]["id"] == "90"
+    # Reset clears the channel's state along with its history.
+    ai.reset(10)
+    assert ai.conversation_states.load("10") is None

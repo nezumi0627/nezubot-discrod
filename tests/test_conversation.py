@@ -16,8 +16,8 @@ def user(user_id, name, *, bot=False):
 
 
 BOT_USER = user(99, "nezubot-discrod", bot=True)
-AZAZEL = user(301, "AzazeliusZ")
-KOKURA = user(302, "kokura_server")
+AZAZEL = user(301, "ZephyrusZ")
+KOKURA = user(302, "sora_server")
 CAROL = user(303, "carol")
 OWNER_ID = 456
 
@@ -78,12 +78,17 @@ def test_reply_chain_contents_authors_and_mentions():
     intro.channel = anchor.channel = channel
     context = build(anchor)
     assert context["reply_chain"] == [
-        {"author": "AzazeliusZ", "author_id": "301", "content": intro.content}
+        {"author": "ZephyrusZ", "author_id": "301", "message_id": "1",
+         "content": intro.content}
     ]
+    assert context["reply_target"] == {
+        "author": "ZephyrusZ", "author_id": "301", "message_id": "1",
+        "content": intro.content,
+    }
     # Carol is named in the replied-to message; the bot itself is excluded.
     assert {entry["id"] for entry in context["mentions"]} == {"303"}
     assert context["grounded_person"] == {
-        "id": "301", "display_name": "AzazeliusZ", "basis": "reply_target",
+        "id": "301", "display_name": "ZephyrusZ", "basis": "reply_target",
     }
 
 
@@ -100,15 +105,15 @@ def test_reply_chain_fetches_unresolved_targets_and_walks_hops():
     for item in (first, second, anchor):
         item.channel = channel
     context = build(anchor)
-    assert [entry["author"] for entry in context["reply_chain"]] == ["AzazeliusZ", "carol"]
+    assert [entry["author"] for entry in context["reply_chain"]] == ["ZephyrusZ", "carol"]
     assert context["grounded_person"]["id"] == "301"
     assert context["grounded_person"]["basis"] == "reply_target"
 
 
 def test_screenshot_case_grounds_to_previous_speaker_not_owner():
-    """雑談で AzazeliusZ が自己紹介した直後、kokura_server がメンションで
+    """雑談で ZephyrusZ が自己紹介した直後、sora_server がメンションで
     「この人物の過去のメッセージさがして」と頼んだケースの再現。
-    接地先は直前の発言者 AzazeliusZ で、オーナーでも発言者本人でもない。"""
+    接地先は直前の発言者 ZephyrusZ で、オーナーでも発言者本人でもない。"""
     intro = message(
         1, AZAZEL, "皆さん、こんにちは！以前から開発していたPC向けAIコンパニオンを公開しました",
     )
@@ -138,8 +143,8 @@ def test_transcript_is_chronological_with_authors_replies_and_anchor_mark():
     lines = context["transcript"].splitlines()
     assert len(lines) == 3
     assert "carol" in lines[0] and "リンクを共有していいですか？" in lines[0]
-    assert "AzazeliusZ" in lines[1] and "（↩ carol への返信）" in lines[1]
-    assert "kokura_server" in lines[2] and lines[2].endswith("← いま応答する発言")
+    assert "ZephyrusZ" in lines[1] and "（↩ carol への返信）" in lines[1]
+    assert "sora_server" in lines[2] and lines[2].endswith("← いま応答する発言")
     assert "grounded_person" not in context
 
 
@@ -172,7 +177,7 @@ def test_transcript_stays_within_budget_and_keeps_the_anchor():
     transcript = context["transcript"]
     assert len(transcript) <= TRANSCRIPT_BUDGET
     assert transcript.splitlines()[-1].endswith("← いま応答する発言")
-    # The most recent history message (index 24) is AzazeliusZ's.
+    # The most recent history message (index 24) is ZephyrusZ's.
     assert context["grounded_person"]["id"] == str(AZAZEL.id)
 
 
@@ -214,7 +219,7 @@ def test_on_message_routes_conversation_context_to_the_assistant():
     conversation = bot.assistant.reply.call_args.kwargs["conversation"]
     assert conversation["grounded_person"]["id"] == "301"
     assert conversation["grounded_person"]["basis"] == "recent_speaker"
-    assert "AzazeliusZ" in conversation["transcript"]
+    assert "ZephyrusZ" in conversation["transcript"]
 
 
 class UnfetchableChannel(FakeChannel):
