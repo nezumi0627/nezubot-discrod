@@ -10,6 +10,8 @@ from contextvars import copy_context
 from threading import BoundedSemaphore, Event
 from time import perf_counter
 
+from nezubot_discrod.appellations import AppellationIndex
+from nezubot_discrod.appellations import person_summary as build_person_summary
 from nezubot_discrod.messages import Source
 from nezubot_discrod.server_log import (
     LEXICAL_MEMO,
@@ -107,6 +109,69 @@ def _alias_snapshot(store, channel_ids, db):
     return snapshot
 
 
+_APPELLATION_TTL_SECONDS = 600.0
+_APPELLATION_MISSING_TTL_SECONDS = 60.0
+
+
+def _appellation_index(store, db):
+    """The appellation graph (who calls whom what), cached on the
+    store. The table is small and mined incrementally, so a TTL
+    refresh is enough; a missing table (mining has not run yet)
+    caches as unavailable for a shorter spell."""
+    cache = store.__dict__.setdefault("_appellation_cache", {})
+    now = perf_counter()
+    entry = cache.get("index")
+    if entry is not None and now < entry[0]:
+        return entry[1]
+    try:
+        # Load on a dedicated connection: the grounding connection
+        # carries the budget's progress handler, and an interrupted
+        # load must not poison this cache with "unavailable".
+        with store.connect() as load_db:
+            index = AppellationIndex.load(load_db)
+    except sqlite3.OperationalError:
+        index = None
+    ttl = _APPELLATION_TTL_SECONDS if index is not None else _APPELLATION_MISSING_TTL_SECONDS
+    cache["index"] = (now + ttl, index)
+    return index
+
+
+def _appellation_people(store, db, where, args, normalized, caller_id):
+    """People the question addresses by a mined appellation: the
+    caller's own name for them first, then the server-wide one.
+    Matches are scope-verified exactly like alias matches; an
+    appellation that does not verify (or verifies to nobody) simply
+    contributes nothing."""
+    # Targeted slice first: one indexed lookup for the names the
+    # question itself presents, fast even on a cold cache under load
+    # (the full index load takes seconds there and blows the whole
+    # grounding budget — the タヌキ incident's actual mechanism).
+    matched = []
+    try:
+        targeted = AppellationIndex.load_for_text(db, normalized)
+    except sqlite3.OperationalError:
+        targeted = None
+    if targeted is not None:
+        matched = targeted.match(normalized, caller_id)
+    if not matched:
+        index = _appellation_index(store, db)
+        if index is None:
+            return []
+        matched = index.match(normalized, caller_id)
+    if not matched:
+        return []
+    existing = _existing_authors(db, where, args, matched, non_bot=True)
+    if not existing:
+        existing = _existing_authors(db, where, args, matched, non_bot=False)
+    if len(existing) == 1:
+        return sorted(existing)
+    if len(existing) > 1:
+        dominant = _dominant_author(db, where, args, existing)
+        if dominant is not None:
+            return [dominant]
+    return []
+
+
 def _existing_authors(db, where, args, author_ids, *, non_bot):
     """Subset of author_ids with at least one in-scope message, checked
     with one batched query instead of one query per author."""
@@ -156,6 +221,7 @@ def resolve_people(store, channel_ids, text, caller_id, message_id=None, seed=No
     if not channel_ids:
         return []
     where, args = store._scope(channel_ids, exclude_message_id=message_id)
+    salvage = {}
     with store.connect() as db:
         if deadline is not None:
             db.set_progress_handler(
@@ -164,10 +230,21 @@ def resolve_people(store, channel_ids, text, caller_id, message_id=None, seed=No
         try:
             return _resolve_people_db(
                 db, store, where, args, channel_ids, text, caller_id,
-                message_id, seed, carryover, deadline,
+                message_id, seed, carryover, deadline, salvage=salvage,
             )
         except sqlite3.OperationalError as error:
             if deadline is not None and "interrupted" in str(error).lower():
+                verified = salvage.get("people") or []
+                if verified:
+                    # The budget interrupt must not throw away people
+                    # already verified before it fired (the タヌキ
+                    # incident: a mined appellation had matched, then
+                    # the alias snapshot load was interrupted and the
+                    # whole resolution degraded to nobody).
+                    logger.info(
+                        "Person grounding exceeded its budget; "
+                        "keeping %d verified people", len(verified))
+                    return verified
                 logger.info("Person grounding exceeded its budget; resolving to nobody")
                 return []
             raise
@@ -177,7 +254,7 @@ def resolve_people(store, channel_ids, text, caller_id, message_id=None, seed=No
 
 
 def _resolve_people_db(db, store, where, args, channel_ids, text, caller_id,
-                       message_id, seed, carryover, deadline=None):
+                       message_id, seed, carryover, deadline=None, salvage=None):
     def over_budget():
         # Explicit checkpoints complement the progress handler: short
         # queries can finish between its callbacks, so a spent budget
@@ -204,6 +281,17 @@ def _resolve_people_db(db, store, where, args, channel_ids, text, caller_id,
     normalized = unicodedata.normalize("NFKC", text).casefold()
     if over_budget():
         return []
+    # Appellations (mined nicknames) are checked before the alias
+    # snapshot loads: a caller-conditioned appellation is stronger
+    # evidence than a display-name substring, and when it resolves,
+    # the turn never pays for the snapshot on the alias path's behalf
+    # alone. Verified matches merge into every later return.
+    appellation_people = _appellation_people(
+        store, db, where, args, normalized, caller_id)
+    if salvage is not None and appellation_people:
+        # Verified before the expensive snapshot load: these survive
+        # a budget interrupt fired during any later phase.
+        salvage["people"] = list(appellation_people)
     snapshot = _alias_snapshot(store, channel_ids, db)
     # Group matches by the name that hit (full alias or its decorated
     # core): when one name maps to several people and the caller is
@@ -237,21 +325,23 @@ def _resolve_people_db(db, store, where, args, channel_ids, text, caller_id,
             if dominant is not None:
                 existing = {dominant}
         resolved.update(existing)
+    if salvage is not None and (resolved or appellation_people):
+        salvage["people"] = sorted(resolved | set(appellation_people))
     if resolved:
-        return sorted(resolved)
+        return sorted(resolved | set(appellation_people))
     if over_budget():
-        return []
+        return appellation_people
     fallback = _token_fallback_people(db, snapshot, where, args, normalized)
     if fallback:
-        return fallback
-    if carryover is not None:
+        return sorted(set(fallback) | set(appellation_people))
+    if carryover is not None and not appellation_people:
         # A follow-up with no person signal of its own (どこ住み？
         # after asking about someone) continues the previous turn's
         # subject; the caller supplies the person that turn settled
         # on. Only used when nothing in the text resolved at all.
         if _existing_authors(db, where, args, [str(carryover)], non_bot=False):
             return [str(carryover)]
-    return []
+    return appellation_people
 
 
 def _alias_token_keys(alias):
@@ -420,10 +510,101 @@ ROUTE_BUDGETS_MS = {
     "reserve_ms": 100,
 }
 
+# Budgets for an extension round: when the first pass finishes with
+# evidence that is not sufficient, only the routes that came up short
+# are re-run, with a larger slice than the first pass gave them. The
+# extension is bounded by pre_retrieve's hard cap, not by these values.
+EXTENSION_BUDGETS_MS = {
+    "grounding_ms": 1200,
+    "lexical_ms": 900,
+    "dense_ms": 1200,
+    "aux_ms": 400,
+}
+
+
+def _prefetch_covers(prefetch_hits, prefetch_subject, people):
+    """Whether prefetched evidence already covers the settled person:
+    the prefetch was keyed to that person and at least two of its hits
+    are theirs, so the dense job would mostly re-fetch the same
+    messages."""
+    if prefetch_subject is None or len(people) != 1:
+        return False
+    if str(people[0]) != str(prefetch_subject):
+        return False
+    return sum(
+        1 for hit in prefetch_hits
+        if str(getattr(hit, "author_id", "")) == str(prefetch_subject)
+    ) >= 2
+
+
+def _assess_sufficiency(available, people, *, dense_available=True,
+                        snapshot_unavailable=False, grounding_cut=False,
+                        has_alt_query=False, dense_extended=False):
+    """Judge whether the evidence gathered so far is sufficient, and
+    which routes are weak when it is not.
+
+    Sufficiency is about the evidence, not the clock (the hard cap is
+    only a safety valve): a settled person's own messages reached the
+    result, or several routes agree on a healthy number of hits. The
+    weak list names the routes an extension round may re-run — a route
+    that cannot change the outcome (no dense backend, a snapshot that
+    is not published, grounding that completed cleanly) is never
+    listed, so extension rounds only spend time where it can help."""
+    authors = set()
+    total = set()
+    delivered_kinds = set()
+    for kind, chunks in available.items():
+        for chunk in chunks:
+            hits = getattr(chunk, "hits", None) or []
+            if hits:
+                delivered_kinds.add(kind)
+            for hit in hits:
+                total.add(hit.id)
+                if getattr(hit, "author_id", None) is not None:
+                    authors.add(str(hit.author_id))
+    count = len(total)
+    person = str(people[0]) if len(people) == 1 else None
+    target_reached = person is not None and person in authors
+    dense_delivered = bool(
+        delivered_kinds & {"dense", "context", "author", "prefetch"}
+    )
+    overview_delivered = "overview" in available
+    sufficient = False
+    reasons = []
+    if person is not None and target_reached and (count >= 3 or overview_delivered):
+        sufficient, reasons = True, ["target_evidence"]
+    elif person is None and count >= 4 and dense_delivered:
+        sufficient, reasons = True, ["multi_route_evidence"]
+    elif count >= 8:
+        sufficient, reasons = True, ["ample_evidence"]
+    weak = []
+    if not sufficient:
+        if person is not None and not target_reached:
+            weak.append("author")
+        if person is None and not people and grounding_cut:
+            weak.append("grounding")
+        # A "dense" chunk whose dense half was discarded as over
+        # budget carries only lexical hits, so a thin result counts
+        # as dense-missing too — unless an extension round already
+        # re-ran dense at full budget and this is all it found.
+        if (dense_available and not snapshot_unavailable
+                and (not dense_delivered or count < 3)
+                and not (dense_extended and dense_delivered)):
+            weak.append("dense")
+        if count < 3 and has_alt_query:
+            weak.append("lexical")
+    return {
+        "sufficient": sufficient, "reasons": reasons, "weak": weak,
+        "total_hits": count, "target_reached": target_reached,
+        "dense_delivered": dense_delivered,
+    }
+
 
 async def pre_retrieve(log, text, *, member_wiki=None, guild_id=None, message_id=None,
                        seed_person=None, carryover_person=None, timeout=0.85, budget=6000,
-                       budgets=None, search_text=None, context_query=None):
+                       budgets=None, search_text=None, context_query=None,
+                       hard_cap=2.5, adaptive=True, prefetch_hits=None,
+                       prefetch_subject=None):
     """Add person history and Server Wiki; private member-wiki excerpts are caller-only.
 
     search_text replaces the question for the archive searches (a
@@ -432,7 +613,17 @@ async def pre_retrieve(log, text, *, member_wiki=None, guild_id=None, message_id
     original text. context_query, when given, drives one extra dense
     search built from the live conversation, so relevant past messages
     surface from the flow of the discussion rather than only from the
-    question's own words."""
+    question's own words.
+
+    With route budgets passed and adaptive on, the first pass is only
+    the opening move: if the evidence it gathers is not sufficient
+    (see _assess_sufficiency), the routes that came up short are
+    re-run with larger budgets until the evidence suffices or the
+    hard_cap safety valve (seconds, total wall clock) is reached.
+    prefetch_hits are archive hits fetched ahead of the question from
+    the channel's conversation state; they are delivered as their own
+    chunk, count toward sufficiency, and — when keyed to the person
+    grounding settles on — stand in for the dense job."""
     started = perf_counter()
     timings = Timings()
     token = CURRENT.set(timings)
@@ -456,12 +647,16 @@ async def pre_retrieve(log, text, *, member_wiki=None, guild_id=None, message_id
         if budgets.get("grounding_ms") is not None:
             grounding_deadline = started + budgets["grounding_ms"] / 1000.0
     effective_text = search_text or text
+    prefetch_list = [
+        hit for hit in (prefetch_hits or []) if str(hit.id) != str(message_id)
+    ]
 
     def publish(kind, chunk):
         if chunk and not stopped.is_set():
             chunks.put((kind, chunk))
 
-    def search(query_text, author, limit, lexical_only=False, kind=None):
+    def search(query_text, author, limit, lexical_only=False, kind=None,
+               budgets_override=None):
         with stage("lexical_search" if lexical_only else "dense_search"):
             try:
                 hits = log.store.search(query_text[:2000], channel_ids=log.channel_ids,
@@ -470,7 +665,9 @@ async def pre_retrieve(log, text, *, member_wiki=None, guild_id=None, message_id
                                         exclude_message_id=message_id,
                                         lexical_only=lexical_only, snapshot_only=not lexical_only,
                                         allow_hybrid=hybrid_gate["allow"],
-                                        route_budgets=route_budgets)
+                                        route_budgets=(budgets_override
+                                                       if budgets_override is not None
+                                                       else route_budgets))
             except DenseSnapshotUnavailable:
                 skipped.append("dense_snapshot")
                 return
@@ -508,6 +705,20 @@ async def pre_retrieve(log, text, *, member_wiki=None, guild_id=None, message_id
         for chunk in _person_chunks(log, person, member_wiki, guild_id, text, message_id, part):
             publish(part, chunk)
 
+    def summary_part(person):
+        # The structured identity/appellation line for a resolved
+        # person (Discord name, the name most people use, the name
+        # this caller uses), so generation can answer 「Xって知って
+        # る？」 about them directly instead of asking back.
+        try:
+            with log.store.connect() as db:
+                index = _appellation_index(log.store, db)
+                summary = build_person_summary(db, index, person, log.caller_id)
+        except (OSError, sqlite3.Error):
+            summary = None
+        if summary:
+            publish("person_summary", LogResult(summary))
+
     def event_part(candidates):
         for chunk in _event_chunks(log, candidates, message_id):
             publish("server_wiki", chunk)
@@ -528,6 +739,81 @@ async def pre_retrieve(log, text, *, member_wiki=None, guild_id=None, message_id
             # dense route's budget inside store.search.
             search(context_query, None, 3, kind="context")
 
+    def dense_search_ext():
+        # Extension re-run of the dense route alone, with the larger
+        # extension budgets: the first pass's dense result was missing
+        # or discarded as over-budget, and the lexical half of the call
+        # is served from this turn's memo, so the time goes to the
+        # query embedding and the snapshot scan.
+        search(effective_text, None, 8, budgets_override=EXTENSION_BUDGETS_MS)
+        if context_query and not stopped.is_set():
+            search(context_query, None, 3, kind="context",
+                   budgets_override=EXTENSION_BUDGETS_MS)
+
+    def author_search_ext(person):
+        if "dense_snapshot" in skipped or log.store._dense is None:
+            # No snapshot to fuse against: an author-scoped lexical
+            # search still delivers the person's own words.
+            search(effective_text, person, 5, lexical_only=True, kind="author",
+                   budgets_override=EXTENSION_BUDGETS_MS)
+        else:
+            search(effective_text, person, 5,
+                   budgets_override=EXTENSION_BUDGETS_MS)
+
+    def alt_query():
+        """A query the first pass has not already run lexically: the
+        original wording when the rewrite drove the first pass, else
+        the conversation-context query."""
+        if search_text and search_text != text:
+            return text
+        if context_query:
+            return context_query
+        return None
+
+    def drain(target):
+        while True:
+            try:
+                kind, chunk = chunks.get_nowait()
+            except queue.Empty:
+                return target
+            target.setdefault(kind, []).append(chunk)
+
+    async def extension_round(weak):
+        nonlocal people
+        jobs = []
+        if "grounding" in weak:
+            retry = await run(
+                "people_ext", resolve_people, log.store, log.channel_ids,
+                text, log.caller_id, message_id, seed_person, carryover_person,
+                perf_counter() + EXTENSION_BUDGETS_MS["grounding_ms"] / 1000.0,
+            ) or []
+            if retry:
+                people = retry
+                hybrid_gate["allow"] = False
+                if len(people) == 1:
+                    jobs.append(run("dense_ext", author_search_ext, people[0],
+                                    dense=True))
+                    jobs.append(run("person_summary", summary_part, people[0]))
+                    jobs.extend(run(part, person_part, people[0], part)
+                                for part in ("overview", "server_wiki", "member_wiki"))
+                else:
+                    publish("ambiguity", LogResult(
+                        "Ambiguous people; request an explicit Discord ID: "
+                        + ", ".join(people[:8])))
+        if "dense" in weak and log.store._dense is not None and len(people) != 1:
+            jobs.append(run("dense_ext", dense_search_ext, dense=True))
+        if "author" in weak and len(people) == 1:
+            jobs.append(run("dense_ext", author_search_ext, people[0], dense=True))
+            if "overview" not in available:
+                jobs.append(run("overview", person_part, people[0], "overview"))
+        if "lexical" in weak:
+            alt = alt_query()
+            if alt:
+                jobs.append(run("lexical_ext", search, alt, None, 8, True, None,
+                                EXTENSION_BUDGETS_MS))
+        if jobs:
+            await asyncio.gather(*jobs)
+
     async def work():
         nonlocal people
         lexical = asyncio.create_task(
@@ -541,8 +827,15 @@ async def pre_retrieve(log, text, *, member_wiki=None, guild_id=None, message_id
                 hybrid_gate["allow"] = False
             jobs = [lexical]
             if log.store._dense is not None:
-                jobs.append(run("dense", dense_search, people, dense=True))
+                if _prefetch_covers(prefetch_list, prefetch_subject, people):
+                    # The prefetch already delivered this person's
+                    # evidence; the dense job would re-fetch the same
+                    # messages and spend the budget doing it.
+                    skipped.append("dense_prefetch")
+                else:
+                    jobs.append(run("dense", dense_search, people, dense=True))
             if len(people) == 1:
+                jobs.append(run("person_summary", summary_part, people[0]))
                 jobs.extend(run(part, person_part, people[0], part)
                             for part in ("overview", "server_wiki", "member_wiki"))
             elif people:
@@ -557,29 +850,95 @@ async def pre_retrieve(log, text, *, member_wiki=None, guild_id=None, message_id
             lexical.cancel()
 
     status = "complete"
+    phase1_status = None
+    verdict = None
+    extended_routes = []
+    extension_rounds = 0
+    cap_hit = False
+    available = {}
     try:
         if not isinstance(log.store, ServerLog) or not log.channel_ids:
             status = "empty_scope"
         else:
-            await asyncio.wait_for(work(), timeout=min(max(timeout, 0), 2))
-    except TimeoutError:
-        status = "deadline"
+            if prefetch_list:
+                prefetch_chunk = LogResult.from_hits(prefetch_list)
+                prefetch_chunk.hits = prefetch_list
+                publish("prefetch", prefetch_chunk)
+            try:
+                await asyncio.wait_for(work(), timeout=min(max(timeout, 0), 2))
+                phase1_status = "complete"
+            except TimeoutError:
+                phase1_status = "deadline"
+            status = phase1_status
+            if adaptive and budgets is not None:
+                # Adaptive extension: while the evidence is not
+                # sufficient and the hard cap leaves room, re-run only
+                # the weak routes. The cap is a safety valve; the
+                # sufficiency verdict is what normally stops the loop.
+                while extension_rounds < 2:
+                    drain(available)
+                    stage_values, _ = timings.snapshot()
+                    grounding_cut = (
+                        phase1_status == "deadline"
+                        or (budgets.get("grounding_ms") is not None
+                            and stage_values.get("people", 0)
+                            >= budgets["grounding_ms"] * 0.95)
+                    )
+                    verdict = _assess_sufficiency(
+                        available, people,
+                        dense_available=log.store._dense is not None,
+                        snapshot_unavailable="dense_snapshot" in skipped,
+                        grounding_cut=grounding_cut,
+                        has_alt_query=bool(alt_query()),
+                        dense_extended=bool(
+                            {"dense", "author"} & set(extended_routes)),
+                    )
+                    if verdict["sufficient"] or not verdict["weak"]:
+                        break
+                    remaining = started + hard_cap - perf_counter() - 0.1
+                    if remaining <= 0.05:
+                        cap_hit = True
+                        break
+                    stopped.clear()
+                    try:
+                        await asyncio.wait_for(
+                            extension_round(verdict["weak"]), timeout=remaining)
+                    except TimeoutError:
+                        cap_hit = True
+                    finally:
+                        stopped.set()
+                    extended_routes.extend(verdict["weak"])
+                    extension_rounds += 1
+                drain(available)
+                verdict = _assess_sufficiency(
+                    available, people,
+                    dense_available=log.store._dense is not None,
+                    snapshot_unavailable="dense_snapshot" in skipped,
+                    grounding_cut=phase1_status == "deadline",
+                    has_alt_query=bool(alt_query()),
+                )
+                if verdict["sufficient"]:
+                    status = ("complete" if extension_rounds == 0
+                              and phase1_status == "complete" else "extended")
+                elif cap_hit or (phase1_status == "deadline" and extension_rounds == 0):
+                    status = "deadline"
+                elif extension_rounds > 0:
+                    status = "extended"
+                else:
+                    status = "complete"
     except asyncio.CancelledError:
         status = "cancelled"
     finally:
         stopped.set()
         CURRENT.reset(token)
         LEXICAL_MEMO.reset(memo_token)
-    available = {}
-    while not chunks.empty():
-        kind, chunk = chunks.get_nowait()
-        available.setdefault(kind, []).append(chunk)
+    drain(available)
     if "dense" in available:
         available.pop("lexical", None)
     selected, sources, remaining, counts = [], [], budget, {}
     delivered = set()
-    for kind in ("dense", "context", "lexical", "ambiguity", "overview",
-                 "member_wiki", "server_wiki", "author"):
+    for kind in ("dense", "context", "prefetch", "lexical", "ambiguity",
+                 "person_summary", "overview", "member_wiki", "server_wiki", "author"):
         for chunk in available.get(kind, []):
             hits = getattr(chunk, "hits", None)
             if hits is not None:
@@ -620,6 +979,15 @@ async def pre_retrieve(log, text, *, member_wiki=None, guild_id=None, message_id
         "budgets": budgets is not None,
         "rewritten": bool(search_text and search_text != text),
         "context_recall": bool(context_query),
+        "adaptive": bool(adaptive and budgets is not None),
+        "phase1_status": phase1_status,
+        "sufficient": verdict["sufficient"] if verdict else None,
+        "weak_routes": verdict["weak"] if verdict else [],
+        "extended_routes": extended_routes,
+        "extension_rounds": extension_rounds,
+        "prefetch_hits": len(prefetch_list),
+        "prefetch_subject": str(prefetch_subject) if prefetch_subject else None,
+        "prefetch_skip_dense": "dense_prefetch" in skipped,
     }
     logger.info("Automatic retrieval %s", json.dumps(result.diagnostics, sort_keys=True))
     if status == "cancelled":

@@ -25,6 +25,13 @@ from nezubot_discrod.messages import (
     verify_inline_links,
 )
 from nezubot_discrod.persona import PERSONA
+from nezubot_discrod.prefetch import (
+    PREFETCH_HITS,
+    PrefetchCache,
+    load_ok,
+    person_subject,
+    topic_subject,
+)
 from nezubot_discrod.prompts import SELF_MOD_PROMPT, SYSTEM, conversation_prompt
 from nezubot_discrod.query_rewrite import build_context_query, rewrite_query
 from nezubot_discrod.sandbox import run_command
@@ -133,6 +140,19 @@ class Assistant:
         self.conversation_states = (
             ConversationStateStore(server_log) if server_log is not None else None
         )
+        # Ahead-of-question evidence prefetch: after a turn settles a
+        # channel's conversation state, the evidence for its topic /
+        # active subject is fetched during idle time and cached for a
+        # short TTL, so the next question in that channel starts with
+        # its archive evidence already in hand. Scopes are remembered
+        # per channel from real turns, so prefetching never widens an
+        # audience.
+        self.prefetch_cache = PrefetchCache()
+        self._prefetch_inflight = set()
+        self._prefetch_tasks = set()
+        self._channel_scopes = {}
+        self._state_channels = set()
+        self._activity_marks = {}
 
     def reset(self, channel_id: int):
         popped = [
@@ -144,6 +164,9 @@ class Assistant:
             self.person_carryover.pop(key, None)
         if popped and self.conversation_states is not None:
             self.conversation_states.clear(str(channel_id))
+        scope = self._channel_scopes.get(str(channel_id))
+        if scope is not None:
+            self.prefetch_cache.invalidate_scope(scope[1])
         if popped:
             # The provider-side conversation threads for these scopes
             # hold the same history server-side; drop them too, or the
@@ -151,6 +174,100 @@ class Assistant:
             forget = getattr(self.client, "forget_threads", None)
             if callable(forget):
                 forget(popped)
+
+    def _prefetch_lookup(self, scope_channels, state, grounded):
+        """Fresh prefetched evidence for this turn's subject, as
+        (hits, person_id_or_None), or None. The state's active
+        subject wins, then this turn's grounded person, then the
+        running topic."""
+        subjects = []
+        subject = (state or {}).get("active_subject") or {}
+        if subject.get("kind") == "person" and subject.get("id"):
+            subjects.append(person_subject(subject["id"]))
+        if grounded.get("id"):
+            subjects.append(person_subject(grounded["id"]))
+        if (state or {}).get("topic"):
+            subjects.append(topic_subject(state["topic"]))
+        for key in subjects:
+            entry = self.prefetch_cache.get(scope_channels, key)
+            if entry is not None:
+                person = key[1] if key[0] == "person" else None
+                return entry["hits"], person
+        return None
+
+    def note_channel_activity(self, channel_id):
+        """A message landed in a channel with a live conversation
+        state (called from the bot's archive path): keep that
+        channel's prefetch warm, throttled per channel."""
+        channel_id = str(channel_id)
+        if channel_id not in self._state_channels:
+            return
+        now = monotonic()
+        if now - self._activity_marks.get(channel_id, 0) < 60:
+            return
+        self._activity_marks[channel_id] = now
+        self._schedule_prefetch(channel_id)
+
+    def _schedule_prefetch(self, channel_id):
+        if self.conversation_states is None or self.server_log is None:
+            return
+        if channel_id not in self._channel_scopes:
+            return
+        self._state_channels.add(channel_id)
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            return
+        task = loop.create_task(self._prefetch_run(channel_id))
+        self._prefetch_tasks.add(task)
+        task.add_done_callback(self._prefetch_tasks.discard)
+
+    async def _prefetch_run(self, channel_id):
+        scope = self._channel_scopes.get(channel_id)
+        if scope is None or self.conversation_states is None:
+            return
+        store, scope_channels = scope
+        try:
+            state = await asyncio.to_thread(self.conversation_states.load, channel_id)
+        except Exception:
+            return
+        if not state:
+            return
+        subject = state.get("active_subject") or {}
+        if subject.get("kind") == "person" and subject.get("id"):
+            key = person_subject(subject["id"])
+            query = state.get("topic") or subject.get("label") or ""
+            author = str(subject["id"])
+        elif state.get("topic"):
+            key = topic_subject(state["topic"])
+            query = state["topic"]
+            author = None
+        else:
+            return
+        if not str(query).strip():
+            return
+        cache_key = (tuple(sorted(map(str, scope_channels))), key)
+        if cache_key in self._prefetch_inflight:
+            return
+        if not self.prefetch_cache.due(scope_channels, key):
+            return
+        if not load_ok():
+            return
+        self._prefetch_inflight.add(cache_key)
+        try:
+            hits = await asyncio.to_thread(
+                store.search, str(query)[:2000], channel_ids=scope_channels,
+                author=author, limit=PREFETCH_HITS,
+            )
+        except Exception:
+            logger.warning("Prefetch search failed", exc_info=True)
+            # Record the attempt so a failing query is not retried on
+            # every message; the empty result caches nothing.
+            self.prefetch_cache.put(scope_channels, key, [], query)
+            return
+        finally:
+            self._prefetch_inflight.discard(cache_key)
+        self.prefetch_cache.put(scope_channels, key, hits, query)
 
     async def reply(
         self,
@@ -239,6 +356,18 @@ class Assistant:
             carryover = self.person_carryover.get(history_key)
             if carryover is not None and monotonic() - carryover[1] > 600:
                 carryover = None
+            self._channel_scopes[str(channel_id)] = (
+                self.server_log, tuple(automatic_log.channel_ids),
+            )
+            if turn_state is not None:
+                self._state_channels.add(str(channel_id))
+            prefetch_hits = None
+            prefetch_subject = None
+            found = self._prefetch_lookup(
+                automatic_log.channel_ids, turn_state, grounded,
+            )
+            if found is not None:
+                prefetch_hits, prefetch_subject = found
             search_text = rewrite_query(
                 content, state=turn_state, conversation=conversation,
                 speaker_name=(speaker_names or {}).get("display_name"),
@@ -250,6 +379,7 @@ class Assistant:
                 carryover_person=carryover[0] if carryover else None,
                 budgets=ROUTE_BUDGETS_MS, search_text=search_text,
                 context_query=context_query,
+                prefetch_hits=prefetch_hits, prefetch_subject=prefetch_subject,
             ))
         if self.system_prompt == SYSTEM and member_id is not None and speaker_names is not None:
             payload["speaker"] = {
@@ -458,6 +588,10 @@ class Assistant:
                 )
             except Exception:
                 logger.warning("Conversation state update failed", exc_info=True)
+            # The state just settled: prefetch its evidence during
+            # idle time so the next question in this channel starts
+            # with the archive search already done.
+            self._schedule_prefetch(str(channel_id))
         # Replay the exact strings that were sent, not the raw user text:
         # the next request then extends this one byte for byte, which is
         # the append-only shape prompt caching needs.

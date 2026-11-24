@@ -887,6 +887,7 @@ class ServerLog:
                         "Dense server log search unavailable; using lexical", exc_info=True
                     )
             dense_ms = budgets.get("dense_ms")
+            dense_discarded = False
             if (
                 dense is not None and dense_ms is not None
                 and dense_started is not None
@@ -904,12 +905,21 @@ class ServerLog:
                     (perf_counter() - dense_started) * 1000, dense_ms,
                 )
                 dense = None
+                dense_discarded = True
                 reason = "dense budget spent"
             if snapshot_only and dense is None:
-                if require_dense:
+                # A budget-discarded dense result is not an unpublished
+                # snapshot: the snapshot exists and the lexical stage
+                # already ran, so degrade to the lexical hits instead
+                # of reporting the whole search as unavailable. The
+                # caller can then tell a thin result from a missing
+                # snapshot and retry dense with a larger budget.
+                if require_dense and not dense_discarded:
                     raise DenseSnapshotUnavailable("No published dense snapshot candidates")
-                return []
-            if require_dense and (not dense or getattr(dense, "coverage", None) == 0):
+                if not dense_discarded:
+                    return []
+            if (require_dense and not dense_discarded
+                    and (not dense or getattr(dense, "coverage", None) == 0)):
                 raise RuntimeError(f"Dense server log search unavailable: {reason}")
             if dense is None:
                 if not lexical_only and self._lexical_reason != reason:

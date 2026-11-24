@@ -54,6 +54,11 @@ from nezubot_discrod.server_log_discord import (
 )
 from nezubot_discrod.server_wiki import ServerWiki, format_pages
 from nezubot_discrod.status import build_status_embed, collect_status
+from nezubot_discrod.understanding import (
+    build_me_embed,
+    collect_understanding,
+    record_me_use,
+)
 from nezubot_discrod.updates import latest_version
 from nezubot_discrod.usage_limits import build_limit_embed, parse_rate_limits
 from nezubot_discrod.web_tools import WebTools
@@ -148,6 +153,8 @@ HELP_TEXT = (
     "- `/help` — この使い方を表示\n"
     "- `/status` — 学習状況（学習したメッセージ数・人数・チャンネル・学習率など）を表示\n"
     "- `/limit` — ChatGPT/Codex の利用枠（5時間枠・週間枠の残り %）を表示\n"
+    "- `/me` — nezubot-discrodが自分をどれくらい理解しているか（理解度 % と内訳）を表示。"
+    "使うと裏で自分の理解を深める処理が走る\n"
     "- `/reset` — このチャンネルの会話履歴をリセット\n"
     "\n"
     "**n! コマンド（メンション不要・メッセージの先頭に付ける）**\n"
@@ -268,6 +275,36 @@ async def show_limit(interaction, bot):
         )
         return
     await interaction.followup.send(embed=build_limit_embed(usage), ephemeral=True)
+
+
+async def show_me(interaction, bot):
+    if interaction.guild_id != bot.settings.guild_id:
+        await interaction.response.send_message("指定サーバーでのみ利用できます。", ephemeral=True)
+        return
+    await interaction.response.defer(ephemeral=True)
+    server_log = bot.server_log
+    user_id = str(interaction.user.id)
+    try:
+        _use_count, queued = await asyncio.to_thread(
+            record_me_use, server_log, user_id
+        )
+        report = await asyncio.to_thread(
+            collect_understanding,
+            server_log,
+            user_id,
+            server_wiki_path=server_log.path.with_name("server_wiki.db"),
+        )
+    except Exception:
+        logger.exception("/me: understanding collection failed")
+        await interaction.followup.send(
+            "理解度の集計に失敗した。時間をおいて再試行してね。", ephemeral=True
+        )
+        return
+    display_name = getattr(interaction.user, "display_name", None) or str(
+        interaction.user
+    )
+    embed = build_me_embed(report, display_name=display_name, queued=queued)
+    await interaction.followup.send(embed=embed, ephemeral=True)
 
 
 async def deliver_answer(channel, question, answer, parts):
@@ -392,6 +429,10 @@ class Bot(discord.Client):
         async def limit_command(interaction: discord.Interaction):
             await show_limit(interaction, self)
 
+        @self.tree.command(name="me", description="自分への理解度を表示（自分だけ表示）")
+        async def me_command(interaction: discord.Interaction):
+            await show_me(interaction, self)
+
     async def setup_hook(self):
         if getattr(self, "server_log", None) is not None:
             try:
@@ -492,6 +533,12 @@ class Bot(discord.Client):
     async def on_message(self, message: discord.Message):
         if getattr(self, "server_log", None) is not None:
             await self.archive(message)
+            # Keep the prefetch warm in channels with a live
+            # conversation state; a no-op everywhere else.
+            assistant = getattr(self, "assistant", None)
+            note = getattr(assistant, "note_channel_activity", None)
+            if callable(note):
+                note(message.channel.id)
         if not accepting_work():
             return
         if message.author.bot or self.user is None:
