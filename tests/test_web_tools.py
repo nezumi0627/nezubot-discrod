@@ -17,6 +17,7 @@ from nezubot_discrod.config import SandboxSettings
 from nezubot_discrod.prompts import SELF_MOD_PROMPT, WEB_GUIDANCE, conversation_prompt
 from nezubot_discrod.web_tools import (
     MAX_BYTES,
+    SEARCH_TIMEOUT,
     WEB_TOOLS,
     PublicResolver,
     WebError,
@@ -24,10 +25,31 @@ from nezubot_discrod.web_tools import (
     _fetch_redirects,
     fetch_text,
     parse_ddg,
+    proxy_for_url,
     public_ip,
     readable,
+    vet_proxy_url,
     vet_url,
 )
+
+PROXY_ENV_VARS = (
+    "http_proxy",
+    "HTTP_PROXY",
+    "https_proxy",
+    "HTTPS_PROXY",
+    "all_proxy",
+    "ALL_PROXY",
+    "no_proxy",
+    "NO_PROXY",
+)
+
+
+@pytest.fixture(autouse=True)
+def _clear_proxy_env(monkeypatch):
+    # The host running the tests may export egress proxy variables; the
+    # direct-path tests must observe the no-proxy behavior regardless.
+    for name in PROXY_ENV_VARS:
+        monkeypatch.delenv(name, raising=False)
 
 FIXTURES = Path(__file__).parent / "fixtures"
 
@@ -248,6 +270,159 @@ def test_fetch_timeout_proxy_isolation_and_error_conversion():
         with pytest.raises(WebError, match="TimeoutError"):
             asyncio.run(fetch_text("https://example.org"))
     budget.assert_called_once_with(10)
+
+
+def test_fetch_text_timeout_parameter():
+    class Session:
+        def __init__(self, **kwargs):
+            self.connector = kwargs["connector"]
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *args):
+            await self.connector.close()
+
+        def get(self, *args, **kwargs):
+            return Response(b"ok")
+
+    timeout = asyncio.timeout
+    with (
+        patch("nezubot_discrod.web_tools.aiohttp.ClientSession", Session),
+        patch("nezubot_discrod.web_tools.asyncio.timeout", wraps=timeout) as budget,
+    ):
+        asyncio.run(fetch_text("https://example.org", timeout=25))
+    budget.assert_called_once_with(25)
+
+
+def test_search_uses_extended_timeout():
+    web = WebTools()
+    with patch(
+        "nezubot_discrod.web_tools.fetch_text",
+        AsyncMock(return_value=("https://example.org", "text/html", "<html></html>")),
+    ) as fetch:
+        web.call("web_search", {"query": "example"})
+    assert fetch.call_args.kwargs["timeout"] == SEARCH_TIMEOUT == 30
+
+
+def test_proxy_for_url_selection(monkeypatch):
+    assert proxy_for_url("https://example.org/") is None
+    assert proxy_for_url("http://example.org/") is None
+    monkeypatch.setenv("https_proxy", "http://proxy.local:3128")
+    assert proxy_for_url("https://example.org/") == "http://proxy.local:3128"
+    assert proxy_for_url("http://example.org/") is None
+    monkeypatch.setenv("ALL_PROXY", "http://all.local:8080")
+    assert proxy_for_url("http://example.org/") == "http://all.local:8080"
+    assert proxy_for_url("https://example.org/") == "http://proxy.local:3128"
+    monkeypatch.delenv("https_proxy")
+    monkeypatch.setenv("HTTPS_PROXY", "http://upper.local:3128")
+    assert proxy_for_url("https://example.org/") == "http://upper.local:3128"
+    monkeypatch.setenv("https_proxy", "socks5://proxy.local:1080")
+    assert proxy_for_url("https://example.org/") == "http://upper.local:3128"
+    monkeypatch.setenv("https_proxy", "not a url")
+    assert proxy_for_url("https://example.org/") == "http://upper.local:3128"
+
+
+def test_proxy_for_url_no_proxy_bypass(monkeypatch):
+    monkeypatch.setenv("https_proxy", "http://proxy.local:3128")
+    monkeypatch.setenv("http_proxy", "http://proxy.local:3128")
+    monkeypatch.setenv("no_proxy", "example.org, .internal.example, bypass.local:8443")
+    assert proxy_for_url("https://example.org/") is None
+    assert proxy_for_url("https://sub.example.org/") is None
+    assert proxy_for_url("https://www.internal.example/") is None
+    assert proxy_for_url("http://bypass.local/") is None
+    assert proxy_for_url("https://other.example/") == "http://proxy.local:3128"
+    monkeypatch.setenv("NO_PROXY", "*")
+    assert proxy_for_url("https://other.example/") is None
+
+
+@pytest.mark.parametrize(
+    "url",
+    [
+        "http://intranet/",
+        "http://intranet/wiki",
+        "https://wiki.internal/",
+        "http://printer.local/",
+        "http://nas.lan/",
+        "http://0x7f.0.0.1/",
+    ],
+)
+def test_vet_proxy_url_rejects_internal_names(url):
+    with pytest.raises(WebError):
+        vet_proxy_url(url)
+
+
+def test_vet_proxy_url_allows_public_targets():
+    vet_proxy_url("https://example.org/path")
+    vet_proxy_url("https://html.duckduckgo.com/html/")
+    vet_proxy_url("https://[2606:4700:4700::1111]/")
+    vet_proxy_url("https://1.2.3.example/")
+
+
+def test_fetch_routes_through_env_proxy(monkeypatch):
+    monkeypatch.setenv("https_proxy", "http://proxy.local:3128")
+    seen = {}
+
+    class Session:
+        def __init__(self, **kwargs):
+            self.connector = kwargs["connector"]
+            seen["resolver"] = self.connector._resolver
+            assert not kwargs["trust_env"] and not kwargs["auto_decompress"]
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *args):
+            await self.connector.close()
+
+        def get(self, url, **kwargs):
+            seen["get"] = (url, kwargs)
+            return Response(b"proxied")
+
+    with patch("nezubot_discrod.web_tools.aiohttp.ClientSession", Session):
+        assert asyncio.run(fetch_text("https://example.org/")) == (
+            "https://example.org/",
+            "text/plain",
+            "proxied",
+        )
+    assert not isinstance(seen["resolver"], PublicResolver)
+    assert seen["get"][1]["proxy"] == "http://proxy.local:3128"
+    assert seen["get"][1]["allow_redirects"] is False
+
+
+def test_proxy_redirects_stay_proxied_and_recheck_targets():
+    proxy = "http://proxy.local:3128"
+    for target in ["http://intranet/", "https://wiki.internal/", "http://169.254.169.254/"]:
+        session = SimpleNamespace(
+            get=Mock(return_value=Response(status=302, headers={"Location": target}))
+        )
+        with pytest.raises(WebError):
+            asyncio.run(_fetch_redirects(session, "https://example.org/", proxy=proxy))
+        assert session.get.call_count == 1
+        session.get.assert_called_with(
+            "https://example.org/", allow_redirects=False, proxy=proxy
+        )
+    session = SimpleNamespace(
+        get=Mock(
+            side_effect=[
+                Response(status=301, headers={"Location": "/next"}),
+                Response(b"done"),
+            ]
+        )
+    )
+    assert asyncio.run(_fetch_redirects(session, "https://example.org/", proxy=proxy)) == (
+        "https://example.org/next",
+        "text/plain",
+        "done",
+    )
+    assert all(
+        call.kwargs["proxy"] == proxy for call in session.get.call_args_list
+    )
+
+
+def test_web_guidance_requires_reporting_tool_errors_verbatim():
+    assert "quote the error as given" in WEB_GUIDANCE
+    assert "never invent a cause" in WEB_GUIDANCE
 
 
 def test_ddg_and_html_fixtures():
