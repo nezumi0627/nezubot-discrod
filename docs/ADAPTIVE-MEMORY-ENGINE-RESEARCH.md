@@ -1,1 +1,94 @@
-IyBEaXNjb3JkIEFkYXB0aXZlIE1lbW9yeSBFbmdpbmUg4oCUIOeglOeptuODu+ioreioiOODu+mrmOmAn+WMluaIkOaenCDnt4/lkIjjgb7jgajjgoEgdjEuMArvvIgyMDI2LTExLTI044CBR1BU5Ye65Yqb56ysM+W8vuOAguODpuODvOOCtuODvOOBjOWPluW+l+OBl+WFseacieOAguWOn+aWh+imgee0hOS/neWtmO+8iQoKIyMgMS4g56CU56m255uu55qECm11bHRpbGluZ3VhbC1lNS1zbWFsbO+8iDM4NOasoeWFg++8ieOCkuaOoeeUqOOBl+OAgeaknOe0ouOCouODq+OCtOODquOCuuODoOODu+iomOaGtuani+mAoOODu+eLrOiHqlNJTUTmvJTnrpfjgavjgojjgaPjgaYgZTUtbGFyZ2Ug5Lul5LiK44Gu5qSc57Si5ZOB6LOq44KS55uu5oyH44GZ44CC5YWx5pyJMS4144Kz44KiQ1BV44O744Oh44Oi44OqNkdC44Gu5bCP5Z6LVk3jgafjgIE1MDDkuIfku7bku6XkuIrjga5EaXNjb3Jk44Ot44Kw44KS6auY6YCf5qSc57Si44Gn44GN44KL44K344K544OG44Og44KS5qeL56+J44GZ44KL44CCCgojIyAyLiDnj77mmYLngrnjgafjga7noJTnqbbmiJDmnpzvvIjigLtHUFTlgbTjga7oqJjov7DjgILjgZPjgaHjgonjga5WTeOBp+OBruWun+a4rOOBp+OBr+OBquOBhO+8iQotIOeLrOiHqkFWWDIgU0lNROOCq+ODvOODjeODqzogTnVtUHkgSU5UMzLmr5QgMjEuNeWAjQotIDEwMOS4h+ODmeOCr+ODiOODq+WFqOS7tuaOoue0ojogcDUwIDE0LjQ3bXMgLyBwOTUgMjMuNDhtc++8iOeLrOiHqkFWWDLvvInjgIJOdW1QeSBJTlQzMiA1MDUuNzRtc+OAgUZQMzLlpInmj5srQkxBUyAyOTAuNDltcwotIDUsMDAw5YCZ6KOc44Gu5YaF56mN5ryU566XOiBwOTUgMC4wNzdtcwotIOaVtOaVsOWGheepjeOBruioiOeul+e1kOaenOOBrzHkuIfku7bjg4bjgrnjg4jjgadOdW1QeeOBqOWujOWFqOS4gOiHtAotIOODmeOCr+ODiOODq+WuuemHj+WJiua4myA5OC4xMyXvvIhMYXJnZSBGUDMy44O755m66KiA5Y2Y5L2N5q+U44Gu55CG6KuW5YCk77yJCi0g44Gf44Gg44GX5a6fRTXjg6Ljg4fjg6vjgafjga7mpJzntKLnsr7luqbjgoTjgIHph4/lrZDljJboo5zmraPjgpLlkKvjgoDjgrPjgrXjgqTjg7PpoZ7kvLzluqbjga7mgKfog73jga/mnKrmpJzoqLzvvIjljp/mlofmmI7oqJjvvIkKCiMjIDMuIOacgOe1guOCouODvOOCreODhuOCr+ODgeODowpHYXRld2F5IOKGkiBJbmdlc3Rpb24g4oaSIFF1ZXJ5IFJvdXRlcu+8iOaEj+Wbs+ODu+S6uueJqeODu+aoqemZkO+8ieKGkiBDb250ZXh0dWFsIE1lbW9yeSBMYXllcu+8iEFkYXB0aXZlIENodW5rZXIgLyBDb250ZXh0IEJ1aWxkZXIgLyBFbnRpdHkgUmVzb2x2ZXIgLyBFdmVudCBFeHRyYWN0b3LvvInihpIgSHlicmlkIFN0b3JhZ2XvvIhTUUxpdGUrRlRTNSAvIFNlcnZlciBXaWtp44O7V2lraSAvIEVudGl0eSBJbmRleCAvIFZlY3RvciBTdG9yZSAzODTmrKHlhYNJTlQ477yJ4oaSIEhpZ2ggUGVyZm9ybWFuY2UgUmV0cmlldmFs77yIRTUtc21hbGwgT05OWCBJTlQ45o6o6KuWIC8gTmF0aXZlIFNJTUQgQ+ODu0FWWDIgLyBBZGFwdGl2ZSBSUkYgLyBFdmlkZW5jZSBSZXJhbmtlcu+8ieKGkiBFeHRlcm5hbCBMTE3vvIjlm57nrZTnlJ/miJDjg7vliLbpmZDku5jjgY3li5XnmoTmg7PotbfvvIkKCiMjIDQuIOaOoeeUqOaKgOihk+S4gOimpwrln4vjgoHovrzjgb86IG11bHRpbGluZ3VhbC1lNS1zbWFsbCAvIOaOqOirljogT05OWCBSdW50aW1l44O7SU5UOOmHj+WtkOWMliAvIOODmeOCr+ODiOODq+S/neWtmDogSU5UOOODuzM4NOasoeWFgyAvIOODmeOCr+ODiOODq+a8lOeulzogQ+iogOiqnuODu0FWWDIgU0lNRCAvIOOCueODiOODrOODvOOCuDogU1FMaXRl44O7bW1hcCAvIOWFqOaWh+aknOe0ojogRlRTNSBiaWdyYW0gLyDoqJjmhrbmp4vpgKA6IEhpZXJhcmNoaWNhbCBNZW1vcnkgLyDkvJroqbHliIblibI6IEFkYXB0aXZlIENodW5raW5nIC8g5paH6ISI6KOc5a6MOiBDb250ZXh0dWFsIEVtYmVkZGluZyAvIOS6uueJqeaknOe0ojogRW50aXR5LWF3YXJlIFJldHJpZXZhbCAvIOaknOe0oue1seWQiDogQWRhcHRpdmUgUlJGIC8g5YaN44Op44Oz44Kt44Oz44KwOiBFdmlkZW5jZSBSZXJhbmtpbmcgLyDlrp/ooYzliLblvqE6IERlYWRsaW5lLWF3YXJlIFNjaGVkdWxpbmcgLyDli5XnmoTmpJzntKI6IEFkYXB0aXZlIFJlY2FsbCAvIOWwhuadpTogS25vd2xlZGdlIERpc3RpbGxhdGlvbgoKIyMgNS4g44Oh44Oi44Oq44O744K544OI44Os44O844K45pyA6YGp5YyW77yI55CG6KuW5YCk77yJCjEyMOS4h+S7tuODu+W5s+WdhzXnmbroqIAv44OB44Oj44Oz44Kv5oOz5a6aOiBMYXJnZSBGUDMy55m66KiA5Y2Y5L2NIDQuOTJHQiAvIFNtYWxsIEZQMzLnmbroqIDljZjkvY0gMS44NEdCIC8gU21hbGwgSU5UOOeZuuiogOWNmOS9jSA0NjAuODBNQiAvIFNtYWxsIElOVDjjg4Hjg6Pjg7Pjgq8gOTIuMTZNQu+8iDk4LjEzJeWJiua4m++8ieOAgjUwMOS4h+eZuuiogOOBp+OCguODgeODo+ODs+OCr+WMluOBp+OBjeOCjOOBsOODmeOCr+ODiOODq+acrOS9kzM4NE1C44CC54++5q616ZqO44Gn44GvQU5O5b+F6aCI44Go44Gb44Ga54us6IeqU0lNROWujOWFqOaOoue0ouOCkuWEquWFiOOBl+OAgeacrOeVquiyoOiNt+OBjOWVj+mhjOOBq+OBquOBo+OBn+WgtOWQiOOBruOBv0FOTuaknOiojuOAggoKIyMgNi4gTGFyZ2XjgpLotoXjgYjjgovjgZ/jgoHjga7nsr7luqbmiKbnlaUK5Lya6Kmx44OB44Oj44Oz44Kv5YyWIC8g5paH6ISI5LuY44GN5Z+L44KB6L6844G/IC8g5Lq654mp44O75Yil5ZCN57Si5byVIC8gU2VydmVyIFdpa2njg5rjg7zjgrjln4vjgoHovrzjgb8gLyDpmo7lsaTlnotSQUcgLyBBZGFwdGl2ZSBSUkYgLyBFdmlkZW5jZSBSZXJhbmtpbmcgLyBIYXJkIE5lZ2F0aXZlIE1pbmluZyAvIEtub3dsZWRnZSBEaXN0aWxsYXRpb27vvIhlNS1sYXJnZeOCkuaVmeW4q+OBqyBEaXNjb3Jk5Zu65pyJ44Gu5pel5pys6Kqe44O75L+X6Kqe44O75YaF6Lyq44ON44K/54m55YyW44GuZTUtc21hbGzjgpLlrabnv5LjgIJMYXJnZeOBruiqpOOCiuOBvuOBp+Wtpue/kuOBl+OBquOBhOOCiOOBhuS6uumWk+eiuuiqjeOBruato+ino+ODh+ODvOOCv+OCguS9teeUqO+8iQoKIyMgNy4g5oCn6IO955uu5qiZ77yI6ZaL55m655uu5qiZ44Gn44GC44KK5a6f5ris44Gn44Gv44Gq44GE77yJCuWfi+OCgei+vOOBv+asoeWFgyAxMDI04oaSMzg0IC8gMTIw5LiH55m66KiA44Gu44OZ44Kv44OI44Or5a656YePIDQuOTJHQuKGkjkyLjE2TUIgLyDln4vjgoHovrzjgb/nlJ/miJDpgJ/luqYgMTQw5Lu2L+WIhuKGkjEw44CcMzDlgI0gLyDpgJrluLjmpJzntKJwOTUgMjAwbXPku6XlhoUgLyDopIfpm5HjgarmpJzntKJwOTUgNTAwbXPku6XlhoUgLyDkuovliY3mpJzntKLmnJ/pmZAgODUwbXMgLyBSZWNhbGxAMjDjg7tNUlIg44GvIExhcmdl5Lul5LiKIC8g5a++5b+c6KaP5qihIDEyMOS4h+KGkjUwMOS4h+S7tuS7peS4igoKIyMgOC4g44Ot44O844OJ44Oe44OD44OX77yIMy8xMyDnoJTnqbbmuIjjgb/vvIkKLSDnoJTnqbbmuIjjgb86IOeLrOiHqkFWWDLlhoXnqY3jgqvjg7zjg43jg6sgLyAxMDDkuIfjg5njgq/jg4jjg6vosqDojbfoqabpqJMgLyDmlbTmlbDlhoXnqY3jga7mraPnorrmgKfmpJzoqLwKLSBQMDogRTUtc21hbGzlrp/jg6Ljg4fjg6vmr5TovIPjg7tPTk5Y5pyA6YGp5YyWCi0gUDA6IElOVDjjgrPjgrXjgqTjg7PpoZ7kvLzluqbjg7tOYXRpdmUgVG9wLUsKLSBQMDogU2VydmVyIFdpa2nln4vjgoHovrzjgb/jg7vkurrnianntKLlvJUKLSBQMDogQWRhcHRpdmUgQ2h1bmtpbmfjg7vmlofohIjoo5zlrowKLSBQMTogQWRhcHRpdmUgUlJG44O75qC55oug5YaN44Op44Oz44Kt44Oz44KwCi0gUDE6IG1tYXDjg7vjgq3jg6Pjg4Pjgrfjg6Xjg7vmqKnpmZDnhKHlirnljJYKLSBQMTog5YuV55qE5oOz6LW344O75pyf6ZmQ566h55CGCi0gUDE6IFNtYWxsIHZzIExhcmdl57K+5bqm5qSc6Ki8Ci0gUDI6IOODieODoeOCpOODs+eJueWMluiSuOeVmeODu0hhcmQgTmVnYXRpdmUgTWluaW5nCi0gUDI6IOacrOeVqlZN44Gn44GuNTAw5LiH55m66KiA55u45b2T6LKg6I236Kmm6aiTCgojIyA5LiDmnIDntYLntZDoq5YKU2FrYW5h44Gu6KiY5oa25qeL6YCg44KS5Y+W44KK5YWl44KM44Gk44Gk44CB54us6Ieq44ON44Kk44OG44Kj44OW5qSc57Si44Kr44O844ON44Or44O76YGp5b+c5Z6L5qSc57Si44O76ZqO5bGk5Z6LUkFH44Gn5beu5Yil5YyW44CC44OZ44Kv44OI44Or5ryU566X44Gv57SEMjEuNeWAjemrmOmAn+WMluOBruaIkOaenO+8iEdQVOiomOi/sO+8ieOAguS4gOaWueOAgUU1LXNtYWxs44GnTGFyZ2Xku6XkuIrjga7mpJzntKLlk4Hos6rjgpLlrp/nj77jgafjgY3jgovjgYvjga/jgb7jgaDoqLzmmI7jgafjgY3jgabjgYTjgarjgYTjgILku4rlvozjga/pgJ/luqbjgaDjgZHjgafjgarjgY/lrp/pmpvjga5EaXNjb3Jk44Ot44Kw44KS55So44GE44Gf5qSc57Si57K+5bqm44Gu5pS55ZaE44KS5pyA5YSq5YWI44Gr44GZ44KL44CCCg==
+# Discord Adaptive Memory Engine — 研究・設計・高速化成果 総合まとめ v1.0
+（2026-11-24、GPT出力第3弾。ユーザーが取得し共有。原文要約保存）
+
+## 1. 研究目的
+multilingual-e5-small（384次元）を採用し、検索アルゴリズム・記憶構造・独自SIMD演算によって e5-large 以上の検索品質を目指す。共有1.5コアCPU・メモリ6GBの小型VMで、500万件以上のDiscordログを高速検索できるシステムを構築する。
+
+## 2. 現時点での研究成果（※GPT側の記述。こちらのVMでの実測ではない）
+- 独自AVX2 SIMDカーネル: NumPy INT32比 21.5倍
+- 100万ベクトル全件探索: p50 14.47ms / p95 23.48ms（独自AVX2）。NumPy INT32 505.74ms、FP32変換+BLAS 290.49ms
+- 5,000候補の内積演算: p95 0.077ms
+- 整数内積の計算結果は1万件テストでNumPyと完全一致
+- ベクトル容量削減 98.13%（Large FP32・発言単位比の理論値）
+- ただし実E5モデルでの検索精度や、量子化補正を含むコサイン類似度の性能は未検証（原文明記）
+
+## 3. 最終アーキテクチャ
+```
+Gateway
+  → Ingestion
+  → Query Router（意図・人物・権限）
+  → Contextual Memory Layer（Adaptive Chunker / Context Builder / Entity Resolver / Event Extractor）
+  → Hybrid Storage（SQLite+FTS5 / Server Wiki・Wiki / Entity Index / Vector Store 384次元INT8）
+  → High Performance Retrieval（E5-small ONNX INT8推論 / Native SIMD C・AVX2 / Adaptive RRF / Evidence Reranker）
+  → External LLM（回答生成・制限付き動的想起）
+```
+
+## 4. 採用技術一覧
+| 領域 | 技術 |
+|---|---|
+| 埋め込み | multilingual-e5-small |
+| 推論 | ONNX Runtime・INT8量子化 |
+| ベクトル保存 | INT8・384次元 |
+| ベクトル演算 | C言語・AVX2 SIMD |
+| ストレージ | SQLite・mmap |
+| 全文検索 | FTS5 bigram |
+| 記憶構造 | Hierarchical Memory |
+| 会話分割 | Adaptive Chunking |
+| 文脈補完 | Contextual Embedding |
+| 人物検索 | Entity-aware Retrieval |
+| 検索統合 | Adaptive RRF |
+| 再ランキング | Evidence Reranking |
+| 実行制御 | Deadline-aware Scheduling |
+| 動的検索 | Adaptive Recall |
+| 将来 | Knowledge Distillation |
+
+## 5. メモリ・ストレージ最適化（理論値）
+120万件・平均5発言/チャンク想定:
+
+| 構成 | ベクトル容量 |
+|---|---|
+| Large FP32発言単位 | 4.92GB |
+| Small FP32発言単位 | 1.84GB |
+| Small INT8発言単位 | 460.80MB |
+| Small INT8チャンク | 92.16MB（98.13%削減） |
+
+500万発言でもチャンク化できればベクトル本体384MB。現段階ではANN必須とせず独自SIMD完全探索を優先し、本番負荷が問題になった場合のみANN検討。
+
+## 6. Largeを超えるための精度戦略
+- 会話チャンク化
+- 文脈付き埋め込み
+- 人物・別名索引
+- Server Wikiページ埋め込み
+- 階層型RAG
+- Adaptive RRF
+- Evidence Reranking
+- Hard Negative Mining
+- Knowledge Distillation（e5-largeを教師に Discord固有の日本語・俗語・内輪ネタ特化のe5-smallを学習。Largeの誤りまで学習しないよう人間確認の正解データも併用）
+
+## 7. 性能目標（開発目標であり実測ではない）
+| 項目 | 目標 |
+|---|---|
+| 埋め込み次元 | 1024→384 |
+| 120万発言のベクトル容量 | 4.92GB→92.16MB |
+| 埋め込み生成速度 | 140件/分→10〜30倍 |
+| 通常検索p95 | 200ms以内 |
+| 複雑な検索p95 | 500ms以内 |
+| 事前検索期限 | 850ms |
+| Recall@20・MRR | Large以上 |
+| 対応規模 | 120万→500万件以上 |
+
+## 8. ロードマップ（3/13 研究済み）
+- 研究済み: 独自AVX2内積カーネル / 100万ベクトル負荷試験 / 整数内積の正確性検証
+- P0: E5-small実モデル比較・ONNX最適化
+- P0: INT8コサイン類似度・Native Top-K
+- P0: Server Wiki埋め込み・人物索引
+- P0: Adaptive Chunking・文脈補完
+- P1: Adaptive RRF・根拠再ランキング
+- P1: mmap・キャッシュ・権限無効化
+- P1: 動的想起・期限管理
+- P1: Small vs Large精度検証
+- P2: ドメイン特化蒸留・Hard Negative Mining
+- P2: 本番VMでの500万発言相当負荷試験
+
+## 9. 最終結論
+Sakanaの記憶構造を取り入れつつ、独自ネイティブ検索カーネル・適応型検索・階層型RAGで差別化。ベクトル演算は約21.5倍高速化の成果（GPT記述）。一方、E5-smallでLarge以上の検索品質を実現できるかはまだ証明できていない。今後は速度だけでなく実際のDiscordログを用いた検索精度の改善を最優先にする。
