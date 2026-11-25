@@ -1,1 +1,5 @@
-ewogICJkZXBlbmRlbmNpZXMiOiB7CiAgICAiQG9wZW5haS9jb2RleCI6ICJeMC4xNzEuMCIKICB9Cn0K
+{
+  "dependencies": {
+    "@openai/codex": "^0.171.0"
+  }
+}

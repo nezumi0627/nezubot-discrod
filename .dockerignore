@@ -1,1 +1,5 @@
-KioKIURvY2tlcmZpbGUKIXB5cHJvamVjdC50b21sCiFuZXp1Ym90X2Rpc2Nyb2QvCiFuZXp1Ym90X2Rpc2Nyb2QvKi5weQo=
+**
+!Dockerfile
+!pyproject.toml
+!nezubot_discrod/
+!nezubot_discrod/*.py
