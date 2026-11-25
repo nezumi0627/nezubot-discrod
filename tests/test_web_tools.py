@@ -17,6 +17,7 @@ from nezubot_discrod.config import SandboxSettings
 from nezubot_discrod.prompts import SELF_MOD_PROMPT, WEB_GUIDANCE, conversation_prompt
 from nezubot_discrod.web_tools import (
     MAX_BYTES,
+    SEARCH_ATTEMPT_TIMEOUT,
     SEARCH_TIMEOUT,
     WEB_TOOLS,
     PublicResolver,
@@ -302,7 +303,90 @@ def test_search_uses_extended_timeout():
         AsyncMock(return_value=("https://example.org", "text/html", "<html></html>")),
     ) as fetch:
         web.call("web_search", {"query": "example"})
-    assert fetch.call_args.kwargs["timeout"] == SEARCH_TIMEOUT == 30
+    # The overall search budget stays SEARCH_TIMEOUT; the first attempt
+    # only gets a slice of it so a stalled attempt can be retried.
+    assert fetch.call_args.kwargs["timeout"] == SEARCH_ATTEMPT_TIMEOUT
+    assert SEARCH_ATTEMPT_TIMEOUT < SEARCH_TIMEOUT == 30
+
+
+DDG_HTML = (
+    '<html><body><a class="result__a" href="https://example.org/page">'
+    "Example result</a>"
+    '<a class="result__snippet">A snippet</a></body></html>'
+)
+
+
+def test_search_retries_once_after_a_timeout():
+    web = WebTools()
+    attempts = []
+
+    async def flaky(url, **kwargs):
+        attempts.append(kwargs["timeout"])
+        if len(attempts) == 1:
+            raise WebError("Web fetch failed (TimeoutError)")
+        return ("https://example.org", "text/html", DDG_HTML)
+
+    with patch("nezubot_discrod.web_tools.fetch_text", side_effect=flaky):
+        result = json.loads(web.call("web_search", {"query": "example"}))
+    assert attempts == [SEARCH_ATTEMPT_TIMEOUT, SEARCH_TIMEOUT - SEARCH_ATTEMPT_TIMEOUT]
+    assert result["results"][0]["title"] == "Example result"
+
+
+def test_search_does_not_retry_other_errors():
+    web = WebTools()
+    with patch(
+        "nezubot_discrod.web_tools.fetch_text",
+        AsyncMock(side_effect=WebError("HTTP 403")),
+    ) as fetch:
+        assert "Web tool error" in web.call("web_search", {"query": "example"})
+    fetch.assert_called_once()
+
+
+def test_search_cache_avoids_refetch():
+    web = WebTools()
+    with patch(
+        "nezubot_discrod.web_tools.fetch_text",
+        AsyncMock(return_value=("https://example.org", "text/html", DDG_HTML)),
+    ) as fetch:
+        first = web.call("web_search", {"query": "example"})
+        second = web.call("web_search", {"query": "example"})
+        web.call("web_search", {"query": "other"})
+    assert first == second
+    assert fetch.call_count == 2
+
+
+LITE_HTML = (
+    "<html><body><table>"
+    '<tr><td><a class="result-link" href="https://example.org/lite">Lite result</a></td></tr>'
+    '<tr><td class="result-snippet">Lite snippet</td></tr>'
+    "</table></body></html>"
+)
+
+
+def test_search_falls_back_to_lite_endpoint_when_html_is_empty():
+    web = WebTools()
+
+    async def by_url(url, **kwargs):
+        if "lite.duckduckgo" in url:
+            return (url, "text/html", LITE_HTML)
+        return (url, "text/html", "<html><body>blocked</body></html>")
+
+    with patch("nezubot_discrod.web_tools.fetch_text", side_effect=by_url):
+        result = json.loads(web.call("web_search", {"query": "example"}))
+    assert result["results"][0]["title"] == "Lite result"
+    assert result["results"][0]["snippet"] == "Lite snippet"
+
+
+def test_pooled_session_is_reused_across_calls():
+    web = WebTools()
+    with patch(
+        "nezubot_discrod.web_tools.fetch_text",
+        AsyncMock(return_value=("https://example.org", "text/html", "ok")),
+    ) as fetch:
+        web.call("read_web_page", {"url": "https://example.org/"})
+        web.call("read_web_page", {"url": "https://example.org/other"})
+    sessions = {id(call.kwargs["session"]) for call in fetch.call_args_list}
+    assert len(sessions) == 1
 
 
 def test_proxy_for_url_selection(monkeypatch):

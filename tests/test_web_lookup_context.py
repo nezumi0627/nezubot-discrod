@@ -65,7 +65,10 @@ def test_web_lookup_skips_all_automatic_private_context(monkeypatch, content):
     wiki.for_member.return_value.context.assert_not_called()
     sent = completion.call_args.kwargs
     assert sent.get("private_read", False) is False
-    assert json.loads(sent["messages"][-1]["content"]) == {"message": content}
+    payload = json.loads(sent["messages"][-1]["content"])
+    assert set(payload) == {"message", "now"}
+    assert payload["message"] == content
+    assert payload["now"]["timezone"] == "Asia/Tokyo"
     assert sent["server_log"] is not None
     assert sent["wiki"] is wiki.for_member.return_value
     assert sent["web"] is assistant.web

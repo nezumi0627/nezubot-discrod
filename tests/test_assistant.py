@@ -98,7 +98,9 @@ def test_wiki_tools_and_context_are_bound_to_the_current_speaker(tmp_path):
     assert "wiki_append" in [tool["function"]["name"] for tool in sent[0]["tools"]]
     assert json.loads(sent[1]["messages"][-1]["content"]) == {"page": "profile", "revision": 1}
     assert json.loads(sent[2]["messages"][-1]["content"])["member_wiki"] == []
-    assert json.loads(sent[3]["messages"][-1]["content"]) == {
+    payload3 = json.loads(sent[3]["messages"][-1]["content"])
+    assert payload3.pop("now")["timezone"] == "Asia/Tokyo"
+    assert payload3 == {
         "message": "What do I like?",
         "member_wiki": [{"page": "profile", "excerpt": "Likes Rust"}],
     }
@@ -120,6 +122,7 @@ def test_speaker_identity_uses_current_discord_sender_and_stays_out_of_system_pr
     first, second = [json.loads(turn["messages"][-1]["content"]) for turn in sent]
     assert first["speaker"] == {"id": "10", **names}
     assert first["member_wiki"] == [{"page": "profile", "excerpt": "Likes Rust"}]
+    assert second.pop("now")["timezone"] == "Asia/Tokyo"
     assert second == {
         "message": content, "speaker": {"id": "20", **names},
         "assistant": {"name": "nezubot-discrod", "model": "test"}, "member_wiki": [],
@@ -186,10 +189,12 @@ def test_reply_without_wiki_when_store_is_unavailable(error, caplog):
     ai = Assistant(client, "test", SandboxSettings(), wiki=wiki, wiki_completion=wiki_completion)
 
     assert asyncio.run(ai.reply(1, "hello", member_id=10, guild_id=100)) == "Still available"
-    assert sent[0]["messages"] == [
-        {"role": "system", "content": SYSTEM},
-        {"role": "user", "content": "hello"},
-    ]
+    assert sent[0]["messages"][0] == {"role": "system", "content": SYSTEM}
+    assert len(sent[0]["messages"]) == 2
+    payload = json.loads(sent[0]["messages"][-1]["content"])
+    assert payload["message"] == "hello"
+    assert payload["now"]["timezone"] == "Asia/Tokyo"
+    assert "member_wiki" not in payload
     assert [tool["function"]["name"] for tool in sent[0]["tools"]] == ["run_command"]
     wiki_completion.assert_not_called()
     assert "Member wiki unavailable; continuing without wiki" in caplog.text
