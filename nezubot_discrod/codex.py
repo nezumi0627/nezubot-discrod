@@ -28,6 +28,7 @@ from nezubot_discrod.prompts import (
 from nezubot_discrod.sandbox import run_command, truncate_output
 from nezubot_discrod.server_log_tools import LOG_PARAMETERS, LOG_TOOLS
 from nezubot_discrod.weather_tools import WEATHER_PARAMETERS, WEATHER_TOOLS
+from nezubot_discrod.web_guard import OutboundGuard
 from nezubot_discrod.web_tools import WEB_PARAMETERS, WEB_TOOLS, has_web_content
 
 CODEX_VERSION = "codex-cli 0.171.0"
@@ -132,8 +133,13 @@ class CodexConnectionError(RuntimeError):
 # Persistent-thread lifetime bounds (plan A):
 # a reused thread keeps its history server-side, so cap how far it can
 # grow beyond the assistant's own replayed history, and drop threads
-# that have been idle long past the backend's cache retention.
-THREAD_MAX_TURNS = 24
+# that have been idle long past the backend's cache retention. The
+# turn cap was halved from 24 to 12 for v1.20.0's input budget: a
+# 24-turn thread re-reads two dozen full evidence payloads on every
+# turn, which is where the measured 106k-token tail came from; the
+# assistant's compacted replay covers the older exchange when a
+# thread rolls over.
+THREAD_MAX_TURNS = 12
 THREAD_MAX_AGE_SECONDS = 6 * 3600
 THREAD_MAX_IDLE_SECONDS = 90 * 60
 THREAD_REGISTRY_LIMIT = 256
@@ -306,6 +312,7 @@ class AppServer:
         self.tool_free = False
         self.private_read = False
         self.web_read = False
+        self.web_guard = OutboundGuard()
         self.usage = None
         self.sources = []
         self.initialized = False
@@ -382,7 +389,29 @@ class AppServer:
         args = params.get("arguments")
         self.tool_calls += 1
         if self.tool_calls > self.max_tool_calls:
-            raise RuntimeError("Codex tool call limit exceeded")
+            # Budget exhausted: answer the call with an error result
+            # instead of failing the whole turn, so the model can wrap
+            # up with what it has already gathered.
+            await self.send(
+                {
+                    "id": data["id"],
+                    "result": {
+                        "success": False,
+                        "contentItems": [
+                            {
+                                "type": "inputText",
+                                "text": (
+                                    "Tool error: the tool-call budget for "
+                                    f"this turn is exhausted ({self.max_tool_calls} "
+                                    "calls). Stop calling tools and answer "
+                                    "now with what you have already gathered."
+                                ),
+                            }
+                        ],
+                    },
+                }
+            )
+            return
         name = params.get("tool")
         scoped = (
             self.thread_id is not None
@@ -418,9 +447,15 @@ class AppServer:
                 text = f"Tool error: {error}"
         elif scoped and self.web is not None and name in WEB_PARAMETERS:
             try:
-                if self.private_read and self.web_read:
-                    text = ("Tool error: web access disabled after reading private data "
-                            "and web content in the same turn")
+                # Outbound payload inspection replaces the old per-turn
+                # taint disable: a web call is blocked only when its
+                # query/URL itself copies private content this turn has
+                # read (see nezubot_discrod.web_guard). Clean follow-up
+                # calls — opening search results, paging, comparing
+                # sources — stay available all turn.
+                blocked = self.web_guard.check_call(name, args)
+                if blocked is not None:
+                    text = blocked
                 else:
                     text = await asyncio.to_thread(self.web.call, name, args)
                     self.web_read = self.web_read or has_web_content(text)
@@ -430,7 +465,7 @@ class AppServer:
         elif scoped and self.weather is not None and name in WEATHER_PARAMETERS:
             # Weather/clock tools hit fixed public APIs with structured
             # arguments and results; they are not web content and do not
-            # take part in the web taint accounting above.
+            # take part in the web guard accounting above.
             try:
                 text = await asyncio.to_thread(self.weather.call, name, args)
                 valid = True
@@ -443,6 +478,7 @@ class AppServer:
                 valid = True
             except (ValueError, TypeError) as error:
                 text = f"Tool error: {error}"
+            self.web_guard.note_private(text)
         elif scoped and self.wiki is not None and name in TOOL_PARAMETERS:
             self.private_read = True
             try:
@@ -450,6 +486,7 @@ class AppServer:
                 valid = True
             except WikiError as error:
                 text = f"Tool error: {error}"
+            self.web_guard.note_private(text)
         tool_elapsed = time.monotonic() - tool_started
         if tool_elapsed >= 3:
             logger.info(
@@ -457,6 +494,11 @@ class AppServer:
             )
         if valid:
             self.sources = collect_tool_sources(self.sources, name, text)
+        if valid and self.tool_calls == self.max_tool_calls - 5:
+            text += (
+                "\n(Tool budget note: 5 tool calls left in this turn; "
+                "start wrapping up.)"
+            )
         await self.send(
             {
                 "id": data["id"],
@@ -517,6 +559,17 @@ class AppServer:
         self.self_improve = config.self_improve
         self.private_read = private_read
         self.web_read = False
+        # Fresh outbound-payload guard for this turn, seeded from the
+        # conversation being sent: each user message is a turn payload
+        # whose non-"message" fields are injected private context
+        # (retrieved excerpts, wiki context, recent messages), while
+        # the "message" fields are the users' own words and exempt.
+        self.web_guard = OutboundGuard()
+        for message in messages or []:
+            if isinstance(message, dict) and message.get("role") == "user":
+                self.web_guard.seed_from_user_payload(message.get("content"))
+        if input_text is not None:
+            self.web_guard.seed_from_user_payload(input_text)
         # Per-turn state reset: a persistent server runs many turns on
         # this one object, and nothing from a previous turn (buffered
         # notifications, tool budget, usage, sources) may leak into the
@@ -673,6 +726,14 @@ class CodexClient:
         wanted = set(scopes)
         for key in [key for key in self._threads if key[0] in wanted]:
             del self._threads[key]
+
+    def catalog_slugs(self):
+        """Slugs of the most recently parsed Codex catalog, or None
+        when no catalog has been loaded in this client's lifetime
+        yet (the catalog is fetched lazily on the first turn)."""
+        if self._catalog_models is None:
+            return None
+        return {entry["slug"] for entry in self._catalog_models}
 
     async def arbitrate(self, *, model, messages):
         async with asyncio.timeout(12):

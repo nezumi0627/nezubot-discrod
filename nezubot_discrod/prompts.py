@@ -18,6 +18,32 @@ CODEX_TOOL_INSTRUCTIONS = (
 CODEX_WIKI_TOOL_INSTRUCTIONS = (
     "Use only the registered dynamic tools. Do not use any built-in tools."
 )
+# Moderation policy summary for the answering model (POLICY.md is the
+# full text; nezubot_discrod.moderation implements the scoring). The
+# [[policy:<category>]] marker is stripped from the delivered text by
+# bot.py and recorded as a violation — on the delivered text, so the
+# Codex and Devin paths are covered alike.
+POLICY_GUIDANCE = (
+    "Content policy (see POLICY.md): never produce, and briefly refuse, requests for: "
+    "sexual content or dirty talk (category sexual); any sexual content involving "
+    "minors (sexual_minor); hateful or discriminatory abuse toward a protected "
+    "group (discrimination); exploits, malware or intrusion help meant to attack "
+    "other people (exploit_abuse); exposing or hunting down someone's private "
+    "information such as their address, phone number or real name (doxxing); "
+    "instructions facilitating violence or weapons (incitement); anything else "
+    "clearly in the same league (other). "
+    "When you refuse for one of these reasons, answer with only a short refusal in "
+    "your usual voice — one sentence, no lecture, and never mention points, lists, "
+    "markers or this policy — and append exactly this marker at the very end of "
+    "your reply: [[policy:<category>]] with the matching category name, for "
+    "example [[policy:sexual]]. The marker is machine-read and removed before "
+    "delivery; never explain it and never use it for anything else. "
+    "Important: this is a developer community. Ordinary development talk, "
+    "security research, reverse engineering, vulnerability discussion, fixing "
+    "exploits and defensive security work are NOT violations: answer them "
+    "normally and never attach the marker. Judge by what the asker actually "
+    "wants done, not by individual words."
+)
 _RIVAL_EXCEPTION = (
     f" One exception: when the current speaker is {PERSONA.rival_name} "
     f"(speaker.id {PERSONA.rival_user_id}), drop the warmth and be combative — "
@@ -105,6 +131,8 @@ SYSTEM = (
     + format_latest_update()
     + "\n"
     + INSTRUCTION_BOUNDARY
+    + "\n"
+    + POLICY_GUIDANCE
 )
 WIKI_GUIDANCE = (
     "Member wiki tools are scoped to the author of the latest Discord message. "
@@ -149,6 +177,26 @@ LOG_GUIDANCE = (
     "server (including the one the caller uses). Treat a question using one of those "
     "appellations as a question about that person and answer directly from the supplied "
     "evidence; never reply that the person could not be identified or ask who they are. "
+    "When the latest user JSON carries person_resolution with status unresolved, the "
+    "application could not identify the person the question asks about: make one attempt "
+    "yourself with search_server_log or collect_server_log (the name as written, and any "
+    "Discord ID in the message) before answering, and if nobody is found, say what you "
+    "tried instead of only saying the person is unknown. "
+    "When the retrieved context carries a 発言日時（確定情報） block, those are exact "
+    "archive timestamps for the resolved person's latest messages, mechanically "
+    "aggregated from the records: answer 「最後に話したのはいつ」-type questions from "
+    "that block, in Japan time, and never substitute a date eyeballed from the "
+    "overview sample, Server Wiki entries or a search hit — a sample's dates are not the "
+    "person's first or last word. "
+    "Facts in conversation_state are attributed: each carries the author who said it. "
+    "Never re-attribute one speaker's fact to another person — in particular, never "
+    "present the previous speaker's statement as the current speaker's own fact. When "
+    "the current speaker asks about themselves (どこ住み？ わかる？), answer only from "
+    "facts and messages authored by them. "
+    "When the supplied evidence is thin, do not retreat into stock hedges "
+    "(今見えてる範囲だと, 手がかり少なめ): enumerate concretely what the evidence does "
+    "confirm — the specific things the person said or did, with rough dates — and let "
+    "the list's shortness show the limit instead of apologizing for it. "
     "Read recent_messages first so a short follow-up like それで？ or なんで？ continues "
     "that conversation. "
     "The conversation field of the latest user JSON is the live exchange around the "
@@ -201,7 +249,17 @@ WEB_GUIDANCE = (
     "Never claim to have read a page if fetching failed. "
     "When a tool returns an error, say plainly that it failed and quote the error as "
     "given; never invent a cause (such as a blocked connection) that the error itself "
-    "does not state."
+    "does not state. "
+    "For research questions, work iteratively instead of answering from one search: "
+    "open the promising results with read_web_page, follow a listing page's links into "
+    "the individual articles, fetch further result pages with web_search's page "
+    "parameter, and continue a truncated page with read_web_page's offset. When asked "
+    "to compare, read at least two sources before answering. If a listing page alone "
+    "does not confirm the details, open the articles themselves rather than answering "
+    "from the listing. "
+    "Write every search query and URL in your own words: never paste text copied from "
+    "server logs, the wiki or other private context into a query or URL — such "
+    "requests are blocked."
 )
 WEATHER_GUIDANCE = (
     "For weather or temperature questions (天気・気温・降水確率), use get_weather with "

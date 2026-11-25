@@ -181,6 +181,12 @@ def build_state_update(previous, *, now, anchor, question, conversation,
         facts.append({
             "text": _clip(head.get("content"), FACT_CLIP),
             "message_id": str(head.get("message_id") or ""),
+            # Whose claim this is. Facts used to travel author-less,
+            # so in a multi-party channel the model attached the
+            # previous speaker's fact to whoever asked next (A-7:
+            # テストユーザー's 「福岡ね」 answered as another member's residence).
+            "author_id": str(head.get("author_id") or ""),
+            "author_name": head.get("author") or "",
             "confirmed": False,
             "kind": "claim_under_discussion",
         })
@@ -227,6 +233,11 @@ def build_state_update(previous, *, now, anchor, question, conversation,
         "last_intent": intent,
         "turn_count": int((previous or {}).get("turn_count") or 0) + 1,
         "last_message_id": str((anchor or {}).get("id") or ""),
+        # Who ran the last turn in this channel. Person-scoped state
+        # (the active subject, person facts) belongs to that speaker's
+        # exchange; a different speaker's self-referential follow-up
+        # must not inherit it (see Assistant's speaker filter).
+        "last_speaker_id": str((anchor or {}).get("author_id") or ""),
         "updated_at": now,
     }
 

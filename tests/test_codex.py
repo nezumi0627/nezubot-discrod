@@ -294,11 +294,17 @@ def test_invalid_dynamic_tools(event):
 
 
 def test_tool_limit():
-    process = FakeProcess(conversation(*[tool() for _ in range(21)]))
+    # Past the cap the turn no longer dies: the extra call is answered
+    # with a budget error result and the model can still finish.
+    process = FakeProcess(conversation(*[tool() for _ in range(21)], *finished()))
     runner = Mock(return_value="ok")
-    with pytest.raises(RuntimeError, match="limit"):
-        asyncio.run(AppServer(process, SandboxSettings(), runner).complete("test", [], "/empty"))
+    answer = asyncio.run(
+        AppServer(process, SandboxSettings(), runner).complete("test", [], "/empty"))
+    assert answer == "done"
     assert runner.call_count == 20
+    results = [p["result"] for p in process.sent if p.get("id") == 99]
+    assert results[-1]["success"] is False
+    assert "budget" in results[-1]["contentItems"][0]["text"]
 
 
 @pytest.mark.parametrize("kind", ["commandExecution", "fileChange", "mcpToolCall", "webSearch"])

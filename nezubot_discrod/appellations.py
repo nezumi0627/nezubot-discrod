@@ -291,18 +291,35 @@ class AppellationIndex:
 
     def __init__(self, rows):
         rows = [tuple(row) for row in rows]
-        targets_per_name = {}
-        for target, _caller, appellation, _count in rows:
-            targets_per_name.setdefault(appellation, set()).add(str(target))
-        artifacts = {
-            appellation for appellation, targets in targets_per_name.items()
-            if len(targets) > MAX_TARGETS_PER_APPELLATION
-        }
+        totals = {}
+        for target, _caller, appellation, count in rows:
+            per = totals.setdefault(appellation, {})
+            per[str(target)] = per.get(str(target), 0) + int(count)
+        # A name mined for very many people is usually a fragment of
+        # longer names (an artifact) and is dropped — unless one
+        # person overwhelmingly owns it. さくら is mined for 21
+        # targets, but 127 of its 139 uses name the same person; the
+        # old rule discarded the name whole, dominant evidence and
+        # all, and the question fell through to a bridge account that
+        # merely had the string in its display name (A-4). For such a
+        # name only the dominant target's rows survive.
+        keep_only = {}
+        artifacts = set()
+        for appellation, per in totals.items():
+            if len(per) <= MAX_TARGETS_PER_APPELLATION:
+                continue
+            ranked = sorted(per.items(), key=lambda item: -item[1])
+            if ranked[0][1] >= 5 * ranked[1][1]:
+                keep_only[appellation] = ranked[0][0]
+            else:
+                artifacts.add(appellation)
         self.by_caller = {}
         self.by_appellation = {}
         self.by_target = {}
         for target, caller, appellation, count in rows:
             if appellation in artifacts:
+                continue
+            if appellation in keep_only and str(target) != keep_only[appellation]:
                 continue
             target, caller = str(target), str(caller)
             count = int(count)
@@ -344,6 +361,32 @@ class AppellationIndex:
         return cls(rows)
 
     @staticmethod
+    def _mentioned(appellation, normalized_text):
+        """Whether the text actually mentions this appellation, as a
+        name. Plain substring matching is not enough: the mined graph
+        contains short fragments (the appellation 「an」, mined from
+        longer names) that occur inside unrelated words — 「an」 sits
+        inside "tanuki_dev" and resolved every such question to a
+        stranger. ASCII names need word boundaries (the alias path's
+        rule), and two-character Japanese names need a preceding
+        boundary so they cannot match inside a longer word （んな in
+        どんな）. Longer Japanese names keep substring matching: they
+        are distinctive enough, and particles attach directly."""
+        if appellation not in normalized_text:
+            return False
+        if appellation.isascii():
+            return re.search(
+                r"(?<![a-z0-9_])" + re.escape(appellation) + r"(?![a-z0-9_])",
+                normalized_text,
+            ) is not None
+        if len(appellation) == 2:
+            return re.search(
+                r"(?<![ぁ-んァ-ヶー一-龥a-zA-Z0-9_])" + re.escape(appellation),
+                normalized_text,
+            ) is not None
+        return appellation in normalized_text
+
+    @staticmethod
     def _dominant(targets):
         """The single target a name points to, when one clearly
         dominates (at least twice the runner-up); None when the name
@@ -365,19 +408,40 @@ class AppellationIndex:
             return []
         caller_id = str(caller_id) if caller_id is not None else None
         for (caller, appellation), targets in self.by_caller.items():
-            if caller != caller_id or appellation not in normalized_text:
+            if caller != caller_id or not self._mentioned(appellation, normalized_text):
                 continue
             target = self._dominant(targets)
             if target is not None:
                 return [target]
         for appellation, targets in self.by_appellation.items():
             total = sum(targets.values())
-            if total < GLOBAL_MIN_COUNT or appellation not in normalized_text:
+            if total < GLOBAL_MIN_COUNT or not self._mentioned(appellation, normalized_text):
                 continue
             target = self._dominant(targets)
             if target is not None:
                 return [target]
         return []
+
+    def match_global(self, normalized_text, *, min_total=5, dominance=3.0):
+        """Caller-independent fallback: a name the whole server uses
+        for one person, with no evidence from this caller at all.
+        The floors are stricter than match()'s (more total evidence,
+        a wider dominance margin) because nothing about the caller
+        corroborates the reading; a name that is merely popular or
+        genuinely shared still resolves to nobody."""
+        if not normalized_text:
+            return []
+        best = None
+        for appellation, targets in self.by_appellation.items():
+            total = sum(targets.values())
+            if total < min_total or not self._mentioned(appellation, normalized_text):
+                continue
+            ranked = sorted(targets.items(), key=lambda item: -item[1])
+            if len(ranked) > 1 and ranked[0][1] < dominance * ranked[1][1]:
+                continue
+            if best is None or ranked[0][1] > best[1]:
+                best = (ranked[0][0], ranked[0][1])
+        return [best[0]] if best is not None else []
 
     def top_appellation(self, target_id, caller_id=None):
         """The name a person is most called: by this caller when they
@@ -403,6 +467,28 @@ class AppellationIndex:
             return None
         appellation, total = max(totals.items(), key=lambda item: item[1])
         return appellation if total >= GLOBAL_MIN_COUNT else None
+
+
+def appellation_list(index, person_id, caller_id=None, limit=6):
+    """The names a person is actually called, most-used first, as
+    (name, total uses) pairs: names this caller uses for them are
+    included on the caller's own evidence, the rest need the
+    server-wide floor. Backs 「呼ばれ方を教えて」 questions, which
+    the one-line person summary (top name only) cannot answer."""
+    if index is None:
+        return []
+    person_id = str(person_id)
+    own = {}
+    if caller_id is not None:
+        for (caller, appellation), targets in index.by_caller.items():
+            if caller == str(caller_id) and person_id in targets:
+                own[appellation] = targets[person_id]
+    ranked = []
+    for appellation, total in (index.by_target.get(person_id) or {}).items():
+        if total >= GLOBAL_MIN_COUNT or appellation in own:
+            ranked.append((appellation, total))
+    ranked.sort(key=lambda item: (-item[1], item[0]))
+    return ranked[:limit]
 
 
 def person_summary(db, index, person_id, caller_id=None):

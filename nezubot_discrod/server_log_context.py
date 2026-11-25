@@ -7,10 +7,13 @@ import sqlite3
 import unicodedata
 from concurrent.futures import ThreadPoolExecutor
 from contextvars import copy_context
+from datetime import UTC, datetime
+from pathlib import Path
 from threading import BoundedSemaphore, Event
 from time import perf_counter
+from zoneinfo import ZoneInfo
 
-from nezubot_discrod.appellations import AppellationIndex
+from nezubot_discrod.appellations import AppellationIndex, appellation_list
 from nezubot_discrod.appellations import person_summary as build_person_summary
 from nezubot_discrod.messages import Source
 from nezubot_discrod.server_log import (
@@ -36,6 +39,36 @@ _SELF = re.compile(
     r"(?:おれ|俺|わたし|私|自分|僕|ぼく|うち)(?:の|について|は|が|を|に|と|とか|って|$)|"
     r"\b(?:me|my|myself)\b", re.IGNORECASE,
 )
+# The shape of a question that is about a person even when no name in
+# it resolved: used only to flag the turn as person-unresolved, so the
+# caller can tell the model to make one resolution attempt of its own
+# instead of answering 「特定できない」 from an empty evidence set.
+_PERSON_QUESTION = re.compile(
+    r"について|って誰|とは|どんな人|誰[？?]|知ってる|知っている|呼ばれ方|って何して|"
+    r"のプロフィール|について教え|についておしえ"
+)
+_APPELLATION_QUESTION = re.compile(r"呼ばれ方|あだ名|ニックネーム|呼び名")
+_JST = ZoneInfo("Asia/Tokyo")
+# The shape of a question that asks WHEN a person last spoke (or first
+# appeared): 「最後いつ話してた？」「久しぶりに顔出したけど前回は」.
+# These have a deterministic answer in the archive — the person's own
+# max(created_at) — but no retrieval route supplies it: the overview's
+# last_seen is the all-time maximum (useless against a 「今日より前」
+# boundary once the person has spoken today), its samples are
+# time-stratified rather than chronological, and free search is
+# relevance-ordered. Left to those, the model composes a date from
+# whatever hit it read last; on 2026-11-25 it answered a regular's
+# 「今日より前は最後いつ話してた？」 with a timestamp that exists
+# nowhere in the archive (2025-05-29 13:41 UTC; the true previous
+# activity was 2026-11-23). Questions matching this shape get a
+# mechanically aggregated person_activity chunk instead.
+_ACTIVITY_QUESTION = re.compile(
+    r"最後に?(?:は|いつ|話し|発言|投稿|来)|最終発言|最後の発言|"
+    r"いつ.{0,4}(?:話し|発言|投稿|来)た|"
+    r"(?:話し|発言|投稿)(?:た|てた)の?(?:は|って)?いつ|"
+    r"前回(?:は|いつ)|最近いつ|久しぶり|顔出|"
+    r"ラストに(?:話し|発言)"
+)
 
 
 def _alias_core(alias):
@@ -55,10 +88,10 @@ class _AliasSnapshot:
 
     __slots__ = ("rows", "_keys", "_cores")
 
-    def __init__(self, rows):
+    def __init__(self, rows, cores=None):
         self.rows = [(normalized, author_id) for normalized, author_id in rows]
         self._keys = None
-        self._cores = None
+        self._cores = cores
 
     def token_keys(self):
         if self._keys is None:
@@ -84,6 +117,71 @@ class _AliasSnapshot:
         return self._cores
 
 
+_ALIAS_DISK_FORMAT = 1
+_ALIAS_DISK_KEEP = 16
+
+
+def _alias_disk_path(store, key):
+    """Where the persisted snapshot for one channel set lives: a side
+    directory next to the archive DB, named by the set's hash. None
+    when the store has no filesystem path (test doubles)."""
+    path = getattr(store, "path", None)
+    if path is None:
+        return None
+    import hashlib
+
+    digest = hashlib.sha256("\n".join(key).encode()).hexdigest()[:24]
+    return Path(str(path) + ".alias-snapshots") / f"{digest}.json"
+
+
+def _alias_snapshot_from_disk(store, key, watermark):
+    """The persisted snapshot for this channel set, when its watermark
+    still matches the alias table's. A disk hit turns a cold-process
+    DISTINCT scan (seconds on the production archive, and the first
+    thing the grounding budget's progress handler interrupts) into a
+    file read that fits the budget."""
+    path = _alias_disk_path(store, key)
+    if path is None:
+        return None
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+        if payload.get("format") != _ALIAS_DISK_FORMAT:
+            return None
+        if payload.get("watermark") != watermark:
+            return None
+        rows = payload["rows"]
+        cores = payload.get("cores")
+        if cores is not None and len(cores) != len(rows):
+            cores = None
+        return _AliasSnapshot(rows, cores=cores)
+    except (OSError, ValueError, KeyError, TypeError):
+        return None
+
+
+def _alias_snapshot_to_disk(store, key, watermark, snapshot):
+    """Persist a freshly scanned snapshot (best-effort; a cache write
+    failure must never fail resolution)."""
+    path = _alias_disk_path(store, key)
+    if path is None:
+        return
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        payload = {
+            "format": _ALIAS_DISK_FORMAT,
+            "watermark": watermark,
+            "rows": [list(row) for row in snapshot.rows],
+            "cores": snapshot.core_names(),
+        }
+        tmp = path.with_suffix(".tmp")
+        tmp.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
+        tmp.replace(path)
+        files = sorted(path.parent.glob("*.json"), key=lambda item: item.stat().st_mtime)
+        for stale in files[: max(0, len(files) - _ALIAS_DISK_KEEP)]:
+            stale.unlink(missing_ok=True)
+    except OSError:
+        pass
+
+
 def _alias_snapshot(store, channel_ids, db):
     """Alias pairs for the channel set, cached on the store.
 
@@ -92,19 +190,25 @@ def _alias_snapshot(store, channel_ids, db):
     unchanged the cached pairs are exactly what a fresh scan would read,
     and resolution results are identical. The per-turn cost drops from
     two full alias scans plus one existence query per matching alias to
-    one watermark probe plus one batched existence query."""
+    one watermark probe plus one batched existence query. A disk copy
+    (validated by the same watermark) survives process restarts, so a
+    cold process no longer pays the scan inside the grounding budget —
+    the interruption that degraded resolution to nobody."""
     key = tuple(sorted({str(channel) for channel in channel_ids}))
     cache = store.__dict__.setdefault("_alias_snapshots", {})
     watermark = db.execute("SELECT MAX(rowid) FROM author_aliases").fetchone()[0]
     entry = cache.get(key)
     if entry is not None and entry[0] == watermark:
         return entry[1]
-    rows = db.execute(
-        "SELECT DISTINCT normalized, author_id FROM author_aliases "
-        f"WHERE channel_id IN ({','.join('?' for _ in key)})",
-        [*key],
-    ).fetchall()
-    snapshot = _AliasSnapshot(rows)
+    snapshot = _alias_snapshot_from_disk(store, key, watermark)
+    if snapshot is None:
+        rows = db.execute(
+            "SELECT DISTINCT normalized, author_id FROM author_aliases "
+            f"WHERE channel_id IN ({','.join('?' for _ in key)})",
+            [*key],
+        ).fetchall()
+        snapshot = _AliasSnapshot(rows)
+        _alias_snapshot_to_disk(store, key, watermark, snapshot)
     cache[key] = (watermark, snapshot)
     return snapshot
 
@@ -151,6 +255,7 @@ def _appellation_people(store, db, where, args, normalized, caller_id):
         targeted = AppellationIndex.load_for_text(db, normalized)
     except sqlite3.OperationalError:
         targeted = None
+    index = None
     if targeted is not None:
         matched = targeted.match(normalized, caller_id)
     if not matched:
@@ -158,6 +263,17 @@ def _appellation_people(store, db, where, args, normalized, caller_id):
         if index is None:
             return []
         matched = index.match(normalized, caller_id)
+    if not matched:
+        # Caller-independent fallback: the caller's own usage met no
+        # threshold, but a name the whole server uses heavily for one
+        # person is still that person (match_global applies stricter
+        # evidence floors to compensate). The cheap targeted slice is
+        # tried before the full index.
+        for source in (targeted, index):
+            if source is not None:
+                matched = source.match_global(normalized)
+                if matched:
+                    break
     if not matched:
         return []
     existing = _existing_authors(db, where, args, matched, non_bot=True)
@@ -306,6 +422,15 @@ def _resolve_people_db(db, store, where, args, channel_ids, text, caller_id,
             pattern = re.escape(form)
             if form.isascii():
                 pattern = r"(?<![a-z0-9_])" + pattern + r"(?![a-z0-9_])"
+            elif len(form) == 2:
+                # A two-character Japanese alias must sit at a name
+                # position, not inside a longer word: the alias んな
+                # (from some decorated display name) matched every
+                # 「どんな人？」 question and dragged a stranger into
+                # them as a phantom second candidate. Real two-char
+                # names （のの) are still matched at the start of the
+                # text or after a delimiter, where names occur.
+                pattern = r"(?<![ぁ-んァ-ヶー一-龥a-zA-Z0-9_])" + pattern
             if re.search(pattern, normalized):
                 matched.setdefault(form, set()).add(author_id)
                 break
@@ -438,6 +563,70 @@ def _person_chunks(log, person, member_wiki, guild_id, text, message_id, part):
                 return
 
 
+def _activity_line(label, row):
+    created = datetime.fromisoformat(row["created_at"])
+    jst = created.astimezone(_JST)
+    stamp = (f"{jst.year}年{jst.month}月{jst.day}日 "
+             f"{jst.hour}:{jst.minute:02d}（JST）")
+    excerpt = " ".join((row["text"] or "").split())[:40]
+    line = f"- {label}: {stamp} #{row['channel_name']}「{excerpt}」"
+    return line, created
+
+
+def _person_activity(store, channel_ids, person, *, message_id=None, now=None):
+    """Deterministic latest-activity facts for one resolved person.
+
+    Two scoped lookups by author id, newest first — no ranking, no
+    sampling: the person's latest message overall, and their latest
+    message before today (Japan time). The second entry is what a
+    「今日より前は最後いつ話してた？」 question actually asks for, and
+    it is exactly what the overview's all-time last_seen cannot say
+    once the person has spoken today. Dates are rendered in JST with
+    the channel and an excerpt so the model can quote them verbatim
+    instead of converting (or inventing) a timestamp."""
+    person = str(person)
+    now = now or datetime.now(_JST)
+    today_start_utc = (
+        now.replace(hour=0, minute=0, second=0, microsecond=0)
+        .astimezone(UTC)
+    )
+    with store.connect() as db:
+        where, args = store._scope(
+            channel_ids, author=(person,), exclude_message_id=message_id)
+        latest = db.execute(
+            f"SELECT m.created_at, m.channel_name, m.text FROM messages m "
+            f"WHERE {where} ORDER BY m.created_at DESC, m.id DESC LIMIT 1",
+            args,
+        ).fetchone()
+        if latest is None:
+            return None
+        where_before, args_before = store._scope(
+            channel_ids, author=(person,), exclude_message_id=message_id,
+            before=today_start_utc.isoformat(),
+        )
+        before_today = db.execute(
+            f"SELECT m.created_at, m.channel_name, m.text FROM messages m "
+            f"WHERE {where_before} ORDER BY m.created_at DESC, m.id DESC "
+            f"LIMIT 1",
+            args_before,
+        ).fetchone()
+    lines = [
+        "発言日時（確定情報）: 以下はアーカイブの実レコードから機械的に集計した"
+        "この人物の発言日時。サンプルや検索ヒットの日付から推測せず、"
+        "「最後に話したのはいつ」型の質問にはこの値で答えること。"
+    ]
+    latest_line, latest_at = _activity_line("最新の発言", latest)
+    lines.append(latest_line)
+    if before_today is not None and before_today["created_at"] != latest["created_at"]:
+        line, _ = _activity_line(
+            f"今日（{now.month}月{now.day}日）より前の最新の発言", before_today)
+        lines.append(line)
+    elif latest_at.astimezone(_JST).date() < now.date():
+        lines.append(
+            "- 今日より前の最新の発言も上記の発言（今日はまだ発言していない）")
+    return LogResult("\n".join(lines))
+
+
 _QUOTED_PHRASE = re.compile(r"[「『]([^」』]{2,60})[」』]")
 _ASCII_RUN = re.compile(r"[A-Za-z0-9]+(?:[ ._-]+[A-Za-z0-9]+)*")
 
@@ -539,7 +728,8 @@ def _prefetch_covers(prefetch_hits, prefetch_subject, people):
 
 def _assess_sufficiency(available, people, *, dense_available=True,
                         snapshot_unavailable=False, grounding_cut=False,
-                        has_alt_query=False, dense_extended=False):
+                        has_alt_query=False, dense_extended=False,
+                        summary_retried=False):
     """Judge whether the evidence gathered so far is sufficient, and
     which routes are weak when it is not.
 
@@ -569,6 +759,17 @@ def _assess_sufficiency(available, people, *, dense_available=True,
         delivered_kinds & {"dense", "context", "author", "prefetch"}
     )
     overview_delivered = "overview" in available
+    # A person question is not sufficiently answered until the
+    # structured identity line (person_summary) has actually arrived:
+    # without it the model cannot tell the question's name and the
+    # evidence's author are the same person, and falls back to
+    # 「特定できない」 even with the person's messages in hand (the
+    # A-5/A-6 pattern). The summary stage is cheap and deterministic,
+    # so a missing one is always worth one extension retry — but only
+    # one: a person with no users row and no appellations has no
+    # summary to give, and retrying forever would tax every turn.
+    summary_delivered = "person_summary" in available
+    summary_missing = person is not None and not summary_delivered
     sufficient = False
     reasons = []
     if person is not None and target_reached and (count >= 3 or overview_delivered):
@@ -577,8 +778,13 @@ def _assess_sufficiency(available, people, *, dense_available=True,
         sufficient, reasons = True, ["multi_route_evidence"]
     elif count >= 8:
         sufficient, reasons = True, ["ample_evidence"]
+    if summary_missing and not summary_retried:
+        sufficient = False
+        reasons = []
     weak = []
     if not sufficient:
+        if summary_missing and not summary_retried:
+            weak.append("person_summary")
         if person is not None and not target_reached:
             weak.append("author")
         if person is None and not people and grounding_cut:
@@ -716,8 +922,39 @@ async def pre_retrieve(log, text, *, member_wiki=None, guild_id=None, message_id
                 summary = build_person_summary(db, index, person, log.caller_id)
         except (OSError, sqlite3.Error):
             summary = None
+            index = None
         if summary:
             publish("person_summary", LogResult(summary))
+        if index is not None and _APPELLATION_QUESTION.search(text or ""):
+            # 「呼ばれ方を教えて」 asks for the whole list, not the
+            # single top name the summary line carries (A-6: a 94k
+            # token turn still answered with three names because the
+            # graph's list never reached the payload).
+            try:
+                names = appellation_list(index, person, log.caller_id)
+            except Exception:
+                names = []
+            if names:
+                listing = "、".join(
+                    f"「{name}」（{count}回）" for name, count in names
+                )
+                publish("appellations", LogResult(
+                    f"呼び名一覧（ログで実際に呼ばれた回数つき）: {listing}"))
+
+    def activity_part(person):
+        # Deterministic latest-activity facts for a 「最後いつ話し
+        # てた？」 question: the one date-bearing answer the archive
+        # can give exactly, computed by author id instead of left to
+        # the model's free search (which composed a nonexistent
+        # timestamp on 2026-11-25). Cheap scoped SQL, same slot pool
+        # as the other person parts.
+        try:
+            chunk = _person_activity(
+                log.store, log.channel_ids, person, message_id=message_id)
+        except (OSError, sqlite3.Error):
+            chunk = None
+        if chunk is not None:
+            publish("person_activity", chunk)
 
     def event_part(candidates):
         for chunk in _event_chunks(log, candidates, message_id):
@@ -778,9 +1015,16 @@ async def pre_retrieve(log, text, *, member_wiki=None, guild_id=None, message_id
                 return target
             target.setdefault(kind, []).append(chunk)
 
+    summary_state = {"retried": False}
+
     async def extension_round(weak):
         nonlocal people
         jobs = []
+        if "person_summary" in weak and len(people) == 1:
+            # The identity line did not survive the first pass (slot
+            # contention or the phase deadline); fetch it on its own.
+            summary_state["retried"] = True
+            jobs.append(run("person_summary", summary_part, people[0]))
         if "grounding" in weak:
             retry = await run(
                 "people_ext", resolve_people, log.store, log.channel_ids,
@@ -794,6 +1038,9 @@ async def pre_retrieve(log, text, *, member_wiki=None, guild_id=None, message_id
                     jobs.append(run("dense_ext", author_search_ext, people[0],
                                     dense=True))
                     jobs.append(run("person_summary", summary_part, people[0]))
+                    if _ACTIVITY_QUESTION.search(text or ""):
+                        jobs.append(run("person_activity", activity_part,
+                                        people[0]))
                     jobs.extend(run(part, person_part, people[0], part)
                                 for part in ("overview", "server_wiki", "member_wiki"))
                 else:
@@ -836,6 +1083,9 @@ async def pre_retrieve(log, text, *, member_wiki=None, guild_id=None, message_id
                     jobs.append(run("dense", dense_search, people, dense=True))
             if len(people) == 1:
                 jobs.append(run("person_summary", summary_part, people[0]))
+                if _ACTIVITY_QUESTION.search(text or ""):
+                    jobs.append(run("person_activity", activity_part,
+                                    people[0]))
                 jobs.extend(run(part, person_part, people[0], part)
                             for part in ("overview", "server_wiki", "member_wiki"))
             elif people:
@@ -892,6 +1142,7 @@ async def pre_retrieve(log, text, *, member_wiki=None, guild_id=None, message_id
                         has_alt_query=bool(alt_query()),
                         dense_extended=bool(
                             {"dense", "author"} & set(extended_routes)),
+                        summary_retried=summary_state["retried"],
                     )
                     if verdict["sufficient"] or not verdict["weak"]:
                         break
@@ -916,6 +1167,7 @@ async def pre_retrieve(log, text, *, member_wiki=None, guild_id=None, message_id
                     snapshot_unavailable="dense_snapshot" in skipped,
                     grounding_cut=phase1_status == "deadline",
                     has_alt_query=bool(alt_query()),
+                    summary_retried=summary_state["retried"],
                 )
                 if verdict["sufficient"]:
                     status = ("complete" if extension_rounds == 0
@@ -937,8 +1189,26 @@ async def pre_retrieve(log, text, *, member_wiki=None, guild_id=None, message_id
         available.pop("lexical", None)
     selected, sources, remaining, counts = [], [], budget, {}
     delivered = set()
-    for kind in ("dense", "context", "prefetch", "lexical", "ambiguity",
-                 "person_summary", "overview", "member_wiki", "server_wiki", "author"):
+    if len(people) == 1:
+        # A settled person question is answered from who the person
+        # is and what they themselves said: the identity line and the
+        # person's own messages take the shared budget first, and the
+        # generic routes fill what is left. The old order let dense /
+        # context chunks (other people's talk about everything) spend
+        # the whole 6,000 chars before the person's own evidence was
+        # reached, so resolved questions still answered thin (A-5/A-6).
+        selection_order = (
+            "person_summary", "person_activity", "appellations", "author",
+            "overview", "member_wiki", "server_wiki",
+            "ambiguity", "dense", "context", "prefetch", "lexical",
+        )
+    else:
+        selection_order = (
+            "dense", "context", "prefetch", "lexical", "ambiguity",
+            "person_summary", "person_activity", "appellations", "overview",
+            "member_wiki", "server_wiki", "author",
+        )
+    for kind in selection_order:
         for chunk in available.get(kind, []):
             hits = getattr(chunk, "hits", None)
             if hits is not None:
@@ -988,6 +1258,12 @@ async def pre_retrieve(log, text, *, member_wiki=None, guild_id=None, message_id
         "prefetch_hits": len(prefetch_list),
         "prefetch_subject": str(prefetch_subject) if prefetch_subject else None,
         "prefetch_skip_dense": "dense_prefetch" in skipped,
+        "summary_delivered": "person_summary" in counts,
+        "activity_question": bool(_ACTIVITY_QUESTION.search(text or "")),
+        "activity_delivered": "person_activity" in counts,
+        "person_unresolved": bool(
+            not people and _PERSON_QUESTION.search(text or "")
+        ),
     }
     logger.info("Automatic retrieval %s", json.dumps(result.diagnostics, sort_keys=True))
     if status == "cancelled":

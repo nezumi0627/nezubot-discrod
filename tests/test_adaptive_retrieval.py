@@ -39,10 +39,27 @@ def _chunk(*hits):
 
 
 def test_sufficiency_target_evidence_for_settled_person():
-    available = {"author": [_chunk(_hit(1, "20"), _hit(2, "20"), _hit(3, "21"))]}
+    available = {
+        "author": [_chunk(_hit(1, "20"), _hit(2, "20"), _hit(3, "21"))],
+        "person_summary": [_chunk()],
+    }
     verdict = _assess_sufficiency(available, ["20"])
     assert verdict["sufficient"] is True
     assert verdict["target_reached"] is True
+    assert verdict["weak"] == []
+
+
+def test_sufficiency_person_question_needs_the_summary_line():
+    # The person's own messages arrived but the identity line did
+    # not: not sufficient, and the one weak route is the summary —
+    # once. A summary that has already been retried (and evidently
+    # does not exist for this person) stops blocking sufficiency.
+    available = {"author": [_chunk(_hit(1, "20"), _hit(2, "20"), _hit(3, "21"))]}
+    verdict = _assess_sufficiency(available, ["20"])
+    assert verdict["sufficient"] is False
+    assert verdict["weak"] == ["person_summary"]
+    verdict = _assess_sufficiency(available, ["20"], summary_retried=True)
+    assert verdict["sufficient"] is True
     assert verdict["weak"] == []
 
 

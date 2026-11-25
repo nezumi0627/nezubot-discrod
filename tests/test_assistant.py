@@ -135,7 +135,7 @@ def test_server_info_is_included_in_the_answer_context():
     ai = Assistant(client, "test", SandboxSettings())
     info = {
         "name": "Example Developers",
-        "owner": {"id": "999", "display_name": "あめっくす"},
+        "owner": {"id": "999", "display_name": "さとう"},
         "created_at": "2024-06-26",
         "member_count": 42,
     }
@@ -148,7 +148,7 @@ def test_server_info_is_included_in_the_answer_context():
     payload = json.loads(sent[0]["messages"][-1]["content"])
     assert payload["server_info"] == {"label": payload["server_info"]["label"], **info}
     assert "サーバー情報" in payload["server_info"]["label"]
-    assert payload["server_info"]["owner"] == {"id": "999", "display_name": "あめっくす"}
+    assert payload["server_info"]["owner"] == {"id": "999", "display_name": "さとう"}
     assert payload["server_info"]["created_at"] == "2024-06-26"
     assert payload["server_info"]["member_count"] == 42
 

@@ -91,3 +91,33 @@ def test_context_query_from_conversation():
     assert "いま応答する発言" not in query
     assert build_context_query({}, None) is None
     assert build_context_query({"transcript": ""}, None) is None
+
+
+def test_context_query_prefers_the_speakers_own_lines():
+    conversation = {
+        "transcript": (
+            "[21:40] タヌキ: 外国人あんま好きじゃない\n"
+            "[21:41] テストユーザー: タヌキの倫理観チェックして\n"
+            "[21:41] テストユーザー: あと最近の活動も ← いま応答する発言"
+        ),
+    }
+    query = build_context_query(conversation, None, speaker_name="テストユーザー")
+    assert query is not None
+    assert "倫理観チェック" in query
+    # Another speaker's latest line is not query material when the
+    # speaker has lines of their own in the window.
+    assert "外国人" not in query
+
+
+def test_context_query_falls_back_to_one_other_line():
+    conversation = {
+        "transcript": (
+            "[21:40] タヌキ: キャッシュの話してた\n"
+            "[21:41] タヌキ: それが問題なんだよね\n"
+            "[21:42] テストユーザー: それってどういうこと ← いま応答する発言"
+        ),
+    }
+    query = build_context_query(conversation, None, speaker_name="テストユーザー")
+    assert query is not None
+    assert "それが問題" in query
+    assert "キャッシュの話" not in query

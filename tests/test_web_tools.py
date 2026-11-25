@@ -674,3 +674,48 @@ def test_both_provider_dispatch_prompt_allowlist_and_switch(monkeypatch):
         Assistant(Mock(), "test", SandboxSettings(), web=web, system_prompt=SELF_MOD_PROMPT).web
         is None
     )
+
+
+def test_search_page_two_passes_result_offset():
+    web = WebTools()
+    seen = []
+
+    async def fetch(url, **kwargs):
+        seen.append((url, kwargs.get("data")))
+        return (url, "text/html", DDG_HTML)
+
+    with patch("nezubot_discrod.web_tools.fetch_text", side_effect=fetch):
+        result = json.loads(web.call("web_search", {"query": "example", "page": 2}))
+    assert result["page"] == 2
+    assert result["results"]
+    assert seen[0][1] == {"q": "example", "s": "10"}
+
+
+def test_search_first_page_sends_no_offset():
+    web = WebTools()
+    seen = []
+
+    async def fetch(url, **kwargs):
+        seen.append(kwargs.get("data"))
+        return (url, "text/html", DDG_HTML)
+
+    with patch("nezubot_discrod.web_tools.fetch_text", side_effect=fetch):
+        result = json.loads(web.call("web_search", {"query": "example"}))
+    assert result["page"] == 1
+    assert seen[0] == {"q": "example"}
+
+
+def test_read_web_page_offset_continues_a_long_page():
+    web = WebTools()
+    body = "a" * 9000 + "b" * 1000
+    with patch(
+        "nezubot_discrod.web_tools.fetch_text",
+        AsyncMock(return_value=("https://example.org/", "text/plain", body)),
+    ):
+        first = json.loads(web.call("read_web_page", {"url": "https://example.org/"}))
+        rest = json.loads(web.call(
+            "read_web_page", {"url": "https://example.org/", "offset": 8000}))
+    assert first["truncated"] is True and first["total_chars"] == 10000
+    assert first["offset"] == 0 and len(first["text"]) == 8000
+    assert rest["offset"] == 8000 and rest["text"] == "a" * 1000 + "b" * 1000
+    assert rest["truncated"] is False

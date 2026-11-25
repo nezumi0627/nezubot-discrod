@@ -14,18 +14,47 @@ from discord import app_commands
 from openai import AsyncOpenAI
 
 from nezubot_discrod.assistant import Assistant
+from nezubot_discrod.blacklist import (
+    add_to_blacklist,
+    init_blacklist,
+    is_blacklisted,
+    list_blacklist,
+    remove_from_blacklist,
+)
 from nezubot_discrod.codex import CodexClient
 from nezubot_discrod.config import Settings
 from nezubot_discrod.conversation import build_conversation_context
+from nezubot_discrod.devin_answer import DevinAnswerer
 from nezubot_discrod.feature_loader import load_features
 from nezubot_discrod.improvement_ui import handle_improve, improvement_callback
 from nezubot_discrod.member_wiki import MemberWiki
 from nezubot_discrod.messages import (
     TEASER_TRIGGER_CHARS,
+    Reply,
     make_teaser,
     split_message,
     split_reply,
     strip_small_text,
+)
+from nezubot_discrod.model_overrides import (
+    MODEL_CHOICES,
+    RESET_CHOICE,
+    clear_model_override,
+    is_devin_model,
+    resolve_model,
+    set_model_override,
+)
+from nezubot_discrod.moderation import (
+    REFUSAL_TEXT,
+    build_blacklist_change_embed,
+    build_escalation_embed,
+    check_message,
+    extract_policy_marker,
+    format_mute_refusal,
+    get_mute_info,
+    init_moderation,
+    is_muted,
+    record_violation,
 )
 from nezubot_discrod.persona import PERSONA
 from nezubot_discrod.prefix_commands import (
@@ -43,6 +72,7 @@ from nezubot_discrod.prompts import (
     WEB_GUIDANCE,
     WIKI_GUIDANCE,
 )
+from nezubot_discrod.ranking import build_rank_embed, collect_ranking
 from nezubot_discrod.sandbox import accepting_work, run_command_enabled
 from nezubot_discrod.selfmod import ImprovementService
 from nezubot_discrod.server_log import ServerLog, format_hits, message_record
@@ -156,7 +186,12 @@ HELP_TEXT = (
     "- `/limit` — ChatGPT/Codex の利用枠（5時間枠・週間枠の残り %）を表示\n"
     "- `/me` — nezubot-discrodが自分をどれくらい理解しているか（理解度 % と内訳）を表示。"
     "使うと裏で自分の理解を深める処理が走る\n"
+    "- `/model` — 自分への回答に使うモデルを切り替える（自分だけに効く。"
+    "デフォルトに戻すこともできる）\n"
+    "- `/rank` — サーバーのメッセージ数ランキング（トップ5と1位の詳細）を表示\n"
     "- `/reset` — このチャンネルの会話履歴をリセット\n"
+    "- `/blacklist` — ブラックリストの追加・削除・一覧（オーナー専用。"
+    "登録された人はコマンドも回答も使えなくなる）\n"
     "\n"
     "**n! コマンド（メンション不要・メッセージの先頭に付ける）**\n"
     "- `n!del` — nezubot-discrodの発言に**リプライ**して送ると、その発言を取り消す"
@@ -308,6 +343,304 @@ async def show_me(interaction, bot):
     await interaction.followup.send(embed=embed, ephemeral=True)
 
 
+async def show_rank(interaction, bot):
+    if interaction.guild_id != bot.settings.guild_id:
+        await interaction.response.send_message("指定サーバーでのみ利用できます。", ephemeral=True)
+        return
+    await interaction.response.defer(ephemeral=True)
+    try:
+        ranking = await asyncio.to_thread(collect_ranking, bot.server_log.path)
+    except Exception:
+        logger.exception("/rank: ranking collection failed")
+        await interaction.followup.send(
+            "ランキングの集計に失敗した。時間をおいて再試行してね。", ephemeral=True
+        )
+        return
+    await interaction.followup.send(embed=build_rank_embed(ranking), ephemeral=True)
+
+
+async def show_model(interaction, bot, choice):
+    if interaction.guild_id != bot.settings.guild_id:
+        await interaction.response.send_message("指定サーバーでのみ利用できます。", ephemeral=True)
+        return
+    user_id = str(interaction.user.id)
+    default = bot.settings.model
+    server_log = bot.server_log
+    try:
+        current = await asyncio.to_thread(
+            resolve_model, server_log, user_id, default
+        )
+        if choice == RESET_CHOICE:
+            removed = await asyncio.to_thread(
+                clear_model_override, server_log, user_id
+            )
+            if removed:
+                text = (
+                    "回答モデルをデフォルトに戻したよ。\n"
+                    f"いまの有効モデル: {current} → デフォルト（{default}）\n"
+                    "次に話しかけたときからデフォルトで答えるね。"
+                )
+            else:
+                text = (
+                    f"もともとデフォルト（{default}）で答えているよ。"
+                    "個別のモデル指定は付いていないよ。"
+                )
+        elif choice not in MODEL_CHOICES:
+            text = "そのモデルは選べないよ。/model の選択肢から選んでね。"
+        else:
+            catalog_slugs = getattr(bot.ai_client, "catalog_slugs", None)
+            slugs = catalog_slugs() if callable(catalog_slugs) else None
+            # swe-2-1 is a Devin backend, not a Codex catalog slug, so
+            # the live-catalog check never applies to it.
+            if slugs is not None and choice not in slugs and not is_devin_model(choice):
+                text = (
+                    f"{choice} は現在のモデルカタログに無いみたい。"
+                    "別のモデルを選んでね。"
+                )
+            else:
+                await asyncio.to_thread(
+                    set_model_override, server_log, user_id, choice
+                )
+                text = (
+                    "あなたの回答モデルを切り替えたよ。\n"
+                    f"いまの有効モデル: {current} → {choice}\n"
+                    f"次に話しかけたときから {choice} で答えるね"
+                    "（他の人のモデルは変わらないよ）。"
+                )
+                if is_devin_model(choice):
+                    text += (
+                        "\nswe-2-1 はツール（サーバーログ検索・Web検索"
+                        "など）を使わず、あらかじめ用意された文脈だけで"
+                        "回答するよ。"
+                    )
+    except (OSError, sqlite3.Error):
+        logger.exception("/model: override update failed")
+        text = "モデルの切り替えに失敗した。時間をおいて再試行してね。"
+    await interaction.response.send_message(text, ephemeral=True)
+
+
+BLACKLIST_REFUSAL = (
+    "あなたはブラックリストに登録されているため、このコマンドは利用できません。"
+)
+
+MUTE_REFUSAL = (
+    "あなたは現在、ポリシー違反による利用制限中のため、このコマンドは利用できません。"
+)
+
+
+async def slash_blacklist_check(bot, interaction):
+    """Global slash gate, wired as the tree's interaction_check.
+
+    A blacklisted member's slash commands — built-ins and loaded
+    features alike — are refused with one short ephemeral note and
+    never reach their handler. A member on the moderation no-response
+    list (POLICY.md: 3 points) is refused the same way while the mute
+    runs, with a note that says why and how much longer the limit
+    lasts. /blacklist itself is exempt so the list stays manageable
+    (its handler is owner-only anyway), and a failed lookup fails
+    open like the other per-user lookups: a DB hiccup must not lock
+    every member out of every command.
+    """
+    command = getattr(interaction, "command", None)
+    if command is not None and getattr(command, "name", None) == "blacklist":
+        return True
+    user = getattr(interaction, "user", None)
+    store = getattr(bot, "server_log", None)
+    if user is None or store is None:
+        return True
+    try:
+        blocked = await asyncio.to_thread(is_blacklisted, store, user.id)
+        mute_info = None
+        if not blocked:
+            mute_info = await asyncio.to_thread(get_mute_info, store, user.id)
+    except Exception:
+        logger.exception("Blacklist/mute check failed; allowing the command")
+        return True
+    if not blocked and mute_info is None:
+        return True
+    logger.info(
+        "Refused slash command from %s user %s",
+        "blacklisted" if blocked else "muted",
+        user.id,
+    )
+    if blocked:
+        text = BLACKLIST_REFUSAL
+    elif mute_info is not None:
+        text = format_mute_refusal(mute_info)
+    else:
+        text = MUTE_REFUSAL
+    try:
+        await interaction.response.send_message(text, ephemeral=True)
+    except Exception:
+        pass
+    return False
+
+
+async def post_channel_embed(channel, embed):
+    """Post a moderation notice embed to a channel. Never raises: a
+    failed send (no permission, channel gone, network) is logged and
+    the bot's own processing carries on."""
+    if channel is None:
+        return
+    try:
+        await channel.send(embed=embed)
+    except Exception:
+        logger.exception("Moderation notice: channel post failed")
+
+
+async def apply_policy_violation(
+    bot, author, category, *, source, excerpt, channel=None
+):
+    """Record one policy violation (POLICY.md) and, only when it
+    escalates to a mute or a policy blacklist entry, announce it with
+    an embed in the channel where the violation happened. The owner
+    is never DM'd, and the public embed never carries the violating
+    text. A plain point addition notifies nobody and shows nothing
+    anywhere. Returns the outcome, or None when recording failed — a
+    DB hiccup must not break the turn."""
+    store = getattr(bot, "server_log", None)
+    if store is None:
+        return None
+    try:
+        outcome = await asyncio.to_thread(
+            record_violation,
+            store,
+            author.id,
+            category,
+            excerpt=excerpt,
+            source=source,
+            owner_id=bot.settings.owner_id,
+        )
+    except Exception:
+        logger.exception("Moderation: violation recording failed")
+        return None
+    if outcome is not None and outcome.notice is not None:
+        name = getattr(author, "display_name", None) or getattr(
+            author, "name", None
+        )
+        embed = build_escalation_embed(outcome.notice, user_name=name)
+        await post_channel_embed(channel, embed)
+    return outcome
+
+
+async def _server_display_name(interaction, bot, user_id):
+    """Best-effort name of a user as shown in this server.
+
+    A guild member's display_name is the server nickname when one is
+    set, so the member lookup comes first (cache, then a fetch); the
+    bot-wide user cache is only a fallback for people who left.
+    """
+    try:
+        uid = int(user_id)
+    except (TypeError, ValueError):
+        return None
+    guild = getattr(interaction, "guild", None)
+    if guild is not None:
+        member = None
+        get_member = getattr(guild, "get_member", None)
+        if callable(get_member):
+            try:
+                member = get_member(uid)
+            except Exception:
+                member = None
+        if member is None:
+            fetch_member = getattr(guild, "fetch_member", None)
+            if callable(fetch_member):
+                try:
+                    member = await fetch_member(uid)
+                except Exception:
+                    member = None
+        if member is not None:
+            return getattr(member, "display_name", None) or str(member)
+    get_user = getattr(bot, "get_user", None)
+    if callable(get_user):
+        try:
+            cached = get_user(uid)
+        except (TypeError, ValueError):
+            cached = None
+        if cached is not None:
+            return getattr(cached, "display_name", None) or str(cached)
+    return None
+
+
+async def show_blacklist(interaction, bot, action, target):
+    if interaction.guild_id != bot.settings.guild_id:
+        await interaction.response.send_message("指定サーバーでのみ利用できます。", ephemeral=True)
+        return
+    if interaction.user.id != bot.settings.owner_id:
+        await interaction.response.send_message("このコマンドはオーナー専用です。", ephemeral=True)
+        return
+    store = bot.server_log
+    notice_embed = None
+    try:
+        if action == "list":
+            rows = await asyncio.to_thread(list_blacklist, store)
+            if not rows:
+                text = "ブラックリストは空です。"
+            else:
+                lines = [f"**ブラックリスト（{len(rows)}人）**"]
+                for user_id, _added_by, created_at, _note in rows:
+                    name = await _server_display_name(interaction, bot, user_id)
+                    label = f"{name}（ID: {user_id}）" if name else f"ID: {user_id}"
+                    day = (created_at or "")[:10]
+                    lines.append(f"- {label}" + (f" — {day} 登録" if day else ""))
+                text = "\n".join(lines)
+        elif action in ("add", "remove"):
+            if target is None:
+                text = "対象ユーザーを指定してね。"
+            else:
+                name = getattr(target, "display_name", None) or str(target)
+                if action == "add":
+                    if target.id == bot.settings.owner_id:
+                        text = "オーナーはブラックリストに追加できません。"
+                    else:
+                        added = await asyncio.to_thread(
+                            add_to_blacklist,
+                            store,
+                            target.id,
+                            added_by=interaction.user.id,
+                        )
+                        if added:
+                            notice_embed = build_blacklist_change_embed(
+                                target.id, added=True, user_name=name
+                            )
+                        text = (
+                            f"{name} をブラックリストに追加したよ。"
+                            "この人のコマンドと回答は今後すべて止まるよ。"
+                            if added
+                            else f"{name} はすでにブラックリストに入っているよ。"
+                        )
+                else:
+                    removed = await asyncio.to_thread(
+                        remove_from_blacklist, store, target.id
+                    )
+                    if removed:
+                        notice_embed = build_blacklist_change_embed(
+                            target.id, added=False, user_name=name
+                        )
+                    text = (
+                        f"{name} をブラックリストから外したよ。"
+                        if removed
+                        else f"{name} はブラックリストに入っていないよ。"
+                    )
+        else:
+            text = "操作は 追加 / 削除 / 一覧 から選んでね。"
+    except (OSError, sqlite3.Error):
+        logger.exception("/blacklist: update failed")
+        text = "ブラックリストの更新に失敗した。時間をおいて再試行してね。"
+    parts = split_message(text)
+    await interaction.response.send_message(parts[0], ephemeral=True)
+    for part in parts[1:]:
+        await interaction.followup.send(part, ephemeral=True)
+    if notice_embed is not None:
+        # A successful add/remove is also announced in the channel
+        # the command ran in (the ephemeral reply above stays the
+        # operator's own confirmation).
+        await post_channel_embed(
+            getattr(interaction, "channel", None), notice_embed
+        )
+
+
 async def deliver_answer(channel, question, answer, parts):
     """Long answers get a ~100-char teaser in the channel and their full
     text in a thread on the teaser; anything else is sent as before.
@@ -362,6 +695,16 @@ class Bot(discord.Client):
             checkout=settings.self_checkout or None,
             guild_id=settings.guild_id,
         )
+        try:
+            init_blacklist(self.server_log)
+        except (OSError, sqlite3.Error):
+            # The gates fail open on a missing table; a DB hiccup at
+            # startup must not take the whole bot down with it.
+            logger.exception("Blacklist initialisation failed")
+        try:
+            init_moderation(self.server_log)
+        except (OSError, sqlite3.Error):
+            logger.exception("Moderation initialisation failed")
         self.log_threads = {}
         self.backfill_task = None
         self.warmup_task = None
@@ -375,6 +718,10 @@ class Bot(discord.Client):
                 max_retries=1,
             )
         web_tools = WebTools.from_env()
+        # One-shot Devin backend for members whose /model choice is
+        # swe-2-1; lazy — it only talks to the bridge when such a
+        # member actually speaks.
+        self.devin_answerer = DevinAnswerer()
         self.assistant = Assistant(
             self.ai_client,
             settings.model,
@@ -385,8 +732,17 @@ class Bot(discord.Client):
             web=web_tools,
             weather=WeatherTools(web_tools) if web_tools is not None else None,
             run_command_enabled=run_command_enabled(),
+            devin_responder=self.devin_answerer.answer,
         )
         self.tree = app_commands.CommandTree(self)
+
+        async def _slash_gate(interaction):
+            return await slash_blacklist_check(self, interaction)
+
+        # One gate for every slash command on this tree, built-ins
+        # and loaded features alike: blacklisted members are refused
+        # centrally instead of per handler.
+        self.tree.interaction_check = _slash_gate
         self.busy = set()
         self.slots = asyncio.Semaphore(4)
         self.improvements = ImprovementService(settings)
@@ -436,6 +792,41 @@ class Bot(discord.Client):
         async def me_command(interaction: discord.Interaction):
             await show_me(interaction, self)
 
+        @self.tree.command(name="rank", description="メッセージ数ランキングを表示（自分だけ表示）")
+        async def rank_command(interaction: discord.Interaction):
+            await show_rank(interaction, self)
+
+        @self.tree.command(name="model", description="自分の回答モデルを切り替え（自分だけ表示）")
+        @app_commands.describe(model="切り替えるモデル（自分の回答だけに効く）")
+        @app_commands.choices(model=[
+            app_commands.Choice(name="デフォルトに戻す", value=RESET_CHOICE),
+            *(
+                app_commands.Choice(name=slug, value=slug)
+                for slug in MODEL_CHOICES
+            ),
+        ])
+        async def model_command(interaction: discord.Interaction, model: str):
+            await show_model(interaction, self, model)
+
+        @self.tree.command(
+            name="blacklist", description="オーナー専用: ブラックリスト管理（自分だけ表示）"
+        )
+        @app_commands.describe(
+            action="追加 / 削除 / 一覧",
+            user="対象ユーザー（追加・削除のとき指定）",
+        )
+        @app_commands.choices(action=[
+            app_commands.Choice(name="追加", value="add"),
+            app_commands.Choice(name="削除", value="remove"),
+            app_commands.Choice(name="一覧", value="list"),
+        ])
+        async def blacklist_command(
+            interaction: discord.Interaction,
+            action: str,
+            user: discord.User = None,
+        ):
+            await show_blacklist(interaction, self, action, user)
+
     async def setup_hook(self):
         if getattr(self, "server_log", None) is not None:
             try:
@@ -476,6 +867,17 @@ class Bot(discord.Client):
                 "SELECT rowid FROM message_fts WHERE message_fts MATCH ? LIMIT 1",
                 ('"ねず"',),
             ).fetchone()
+            # Grounding's appellation graph: loading it cold inside a
+            # turn's 400 ms grounding budget is what let the progress
+            # handler interrupt resolution down to nobody. Keeping it
+            # loaded here, off the turn path, means resolution always
+            # sees the warm index (the store-level cache serves turns).
+            try:
+                from nezubot_discrod.server_log_context import _appellation_index
+
+                _appellation_index(self.server_log, db)
+            except Exception:
+                pass
 
     async def close(self):
         if self.warmup_task is not None:
@@ -552,6 +954,40 @@ class Bot(discord.Client):
             message.author.id,
         ):
             return
+        # Blacklist / no-response gate: a listed member's prefix
+        # commands and mention/reply triggers are dropped silently
+        # (INFO log only), before either can reach a handler or the
+        # assistant. The no-response list is the moderation system's
+        # 24h mute (POLICY.md) and is enforced exactly like the
+        # blacklist. Their messages are still archived above like
+        # everyone else's — the lists gate responses, not the record.
+        # Both answer paths (Codex and Devin) sit below this point,
+        # so one check covers them together, and a listed member is
+        # never re-judged by the moderation layers below.
+        store = getattr(self, "server_log", None)
+        if store is not None:
+            try:
+                blocked = await asyncio.to_thread(
+                    is_blacklisted, store, message.author.id
+                )
+                muted = False
+                if not blocked:
+                    muted = await asyncio.to_thread(
+                        is_muted, store, message.author.id
+                    )
+            except Exception:
+                logger.exception(
+                    "Blacklist/mute check failed; allowing the message"
+                )
+                blocked = False
+                muted = False
+            if blocked or muted:
+                logger.info(
+                    "Dropping message from %s user %s",
+                    "blacklisted" if blocked else "muted",
+                    message.author.id,
+                )
+                return
         # n! prefix commands fire without a mention, ahead of the call
         # check and the busy gate, so n!del stays reachable
         # while an answer is being generated.
@@ -578,6 +1014,31 @@ class Bot(discord.Client):
         if not content:
             await channel.send("メッセージを入力してください。履歴の削除は /reset です。")
             return
+        # Moderation layer 1 (POLICY.md): a calling message whose
+        # text is an unambiguous violation never reaches the model.
+        # It gets one fixed refusal and the violation is recorded
+        # silently — points are never shown to anyone, and only an
+        # escalation (mute / blacklist) is announced, with an embed
+        # in this channel. The owner is exempt from moderation
+        # entirely.
+        if store is not None and message.author.id != self.settings.owner_id:
+            match = check_message(content)
+            if match is not None:
+                logger.info(
+                    "Policy layer-1 hit (category=%s) from user %s",
+                    match.category,
+                    message.author.id,
+                )
+                await apply_policy_violation(
+                    self,
+                    message.author,
+                    match.category,
+                    source="pattern",
+                    excerpt=content,
+                    channel=channel,
+                )
+                await channel.send(REFUSAL_TEXT)
+                return
         self.busy.add(channel.id)
         try:
             conversation = await build_conversation_context(message, self.user.id)
@@ -613,9 +1074,45 @@ class Bot(discord.Client):
                             **improvement,
                         )
                 except Exception:
-                    logger.warning("AI request failed (channel %s)", channel.id)
+                    logger.exception("AI request failed (channel %s)", channel.id)
                     answer = "AI への接続に失敗しました。時間をおいて再試行してください。"
-                parts = split_reply(answer, self.settings.model)
+                # Moderation layer 2 (POLICY.md): when the model
+                # refused a policy-violating request it ends its
+                # answer with a hidden [[policy:<category>]] marker.
+                # Strip the marker here — on the delivered text, so
+                # the Codex and Devin paths are covered alike — and
+                # record the violation silently. The strip always
+                # runs so a marker never leaks into a message;
+                # recording exempts the owner inside record_violation.
+                cleaned, flagged = extract_policy_marker(answer)
+                if flagged is not None:
+                    answer = Reply(
+                        cleaned,
+                        usage=getattr(answer, "usage", None),
+                        sources=getattr(answer, "sources", ()),
+                    )
+                    await apply_policy_violation(
+                        self,
+                        message.author,
+                        flagged,
+                        source="model",
+                        excerpt=content,
+                        channel=channel,
+                    )
+                footer_model = self.settings.model
+                if getattr(self, "server_log", None) is not None:
+                    try:
+                        footer_model = await asyncio.to_thread(
+                            resolve_model,
+                            self.server_log,
+                            message.author.id,
+                            self.settings.model,
+                        )
+                    except Exception:
+                        # The footer is cosmetic; never lose the
+                        # answer over a failed override lookup.
+                        pass
+                parts = split_reply(answer, footer_model)
                 sent = await deliver_answer(channel, content, answer, parts)
                 record_answer_authors(self, sent, message.author.id)
         finally:

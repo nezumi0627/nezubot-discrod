@@ -425,7 +425,7 @@ def test_slow_server_wiki_does_not_block_overview_or_member_wiki(archive, monkey
 
 
 @pytest.mark.parametrize("provider", ["openai", "codex"])
-def test_automatic_context_reaches_model_without_tool_call_and_taints_web(archive, provider):
+def test_automatic_context_reaches_model_without_tool_call_and_web_stays_open(archive, provider):
     archive = dense_store(archive)
     archive.embed_pending()
     web = Mock()
@@ -446,8 +446,11 @@ def test_automatic_context_reaches_model_without_tool_call_and_taints_web(archiv
         assert completion.call_args.kwargs["private_read"] is True
         assert completion.call_args.kwargs["server_log"].caller_id == "20"
     else:
-        assert web.call.call_count == 1
-        assert "web access disabled" in sent[-1]["messages"][-1]["content"]
+        # v1.13.0: the injected private context no longer disables web
+        # access; both clean searches run (payload inspection, see
+        # nezubot_discrod.web_guard).
+        assert web.call.call_count == 2
+        assert "blocked" not in sent[-1]["messages"][-1]["content"]
 
 
 @pytest.mark.parametrize(("guild_id", "channel", "expected"), [

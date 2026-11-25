@@ -102,11 +102,29 @@ def rewrite_query(text, *, state=None, conversation=None, speaker_name=None):
     return rewritten[:MAX_REWRITE_CHARS]
 
 
-def build_context_query(conversation, state=None):
+def _transcript_line(line):
+    """One transcript line as (speaker name, bare words): the
+    "[HH:MM] name: " dressing and the reply annotation stripped."""
+    text = re.sub(r"^\[\d{2}:\d{2}\] ", "", line)
+    name = ""
+    if ": " in text:
+        name, text = text.split(": ", 1)
+    text = re.sub(r"（↩ .*? への返信）$", "", text).strip()
+    return name.strip(), text
+
+
+def build_context_query(conversation, state=None, speaker_name=None):
     """A dense-search query built from the live conversation: the
-    reply target's words, the latest lines other speakers contributed,
-    and the running topic. None when there is no conversation to speak
-    of."""
+    reply target's words, the latest lines the *speaker themselves*
+    contributed, and the running topic. None when there is no
+    conversation to speak of.
+
+    The transcript tail used to be whoever spoke last — usually
+    somebody else — so the context route kept retrieving around the
+    previous speaker's words and dragging the answer toward the
+    latest topic (the B-3 recency pull). Other people's lines are
+    only used when the speaker has said nothing in the window yet
+    (a first interjection into a running conversation)."""
     parts = []
     target = _reply_target(conversation)
     if target.get("content"):
@@ -117,13 +135,16 @@ def build_context_query(conversation, state=None):
             line for line in transcript.split("\n")
             if line.strip() and "←" not in line
         ]
-        for line in lines[-2:]:
-            # Strip the "[HH:MM] name: " dressing; keep the words.
-            text = re.sub(r"^\[\d{2}:\d{2}\] ", "", line)
-            text = text.split(": ", 1)[-1] if ": " in text else text
-            text = re.sub(r"（↩ .*? への返信）$", "", text).strip()
-            if text:
-                parts.append(_clip(text, 150))
+        parsed = [_transcript_line(line) for line in lines]
+        own = [
+            text for name, text in parsed
+            if text and speaker_name and name == speaker_name
+        ]
+        pool = own[-2:] if own else [
+            text for _name, text in parsed if text
+        ][-1:]
+        for text in pool:
+            parts.append(_clip(text, 150))
     topic = _clip((state or {}).get("topic"), 120)
     if topic and all(topic not in part for part in parts):
         parts.append(topic)

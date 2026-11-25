@@ -268,13 +268,13 @@ def test_guild_facts_come_from_the_discord_guild_object():
     guild = SimpleNamespace(
         name="Example Developers",
         owner_id=999,
-        owner=SimpleNamespace(display_name="あめっくす"),
+        owner=SimpleNamespace(display_name="さとう"),
         created_at=datetime(2024, 6, 26, 12, 0, tzinfo=UTC),
         member_count=42,
     )
     assert guild_facts(guild) == {
         "name": "Example Developers",
-        "owner": {"id": "999", "display_name": "あめっくす"},
+        "owner": {"id": "999", "display_name": "さとう"},
         "created_at": "2024-06-26",
         "member_count": 42,
     }

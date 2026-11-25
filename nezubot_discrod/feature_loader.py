@@ -15,7 +15,10 @@ from nezubot_discrod.sandbox import accepting_work
 
 logger = logging.getLogger(__name__)
 BUILTIN_COMMANDS = frozenset(
-    {"reset", "prompt", "improve", "search", "wiki", "help", "status", "limit", "me"}
+    {
+        "reset", "prompt", "improve", "search", "wiki", "help", "status",
+        "limit", "me", "model", "rank", "blacklist",
+    }
 )
 MAX_FEATURE_COMMANDS = 20
 

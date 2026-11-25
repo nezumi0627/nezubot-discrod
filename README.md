@@ -1,8 +1,8 @@
 # nezubot-discrod
 
 ![Python](https://img.shields.io/badge/python-3.12%2B-blue)
-![Version](https://img.shields.io/badge/version-1.11.0-informational)
-![Tests](https://img.shields.io/badge/tests-1279%20passed-brightgreen)
+![Version](https://img.shields.io/badge/version-1.20.1-informational)
+![Tests](https://img.shields.io/badge/tests-1480%20passed-brightgreen)
 
 **メンションに答える Discord AI Bot。** サーバー全体の発言ログを検索（RAG）して
 過去の会話や人物について答え、メンバーごとの記憶（Wiki）を持ちます。
@@ -78,6 +78,10 @@
 - **人物サマリ付きの回答** — 人物が特定できたときは、その人の
   Discord 名・大半の人からの呼び名・質問者からの呼び名を添えて
   答える。「Xって知ってる？」に聞き返さず直接答える
+- **最終発言の確定情報** — 「最後に話したのはいつ？」型の質問には、
+  その人の発言を新しい順に機械集計した確定日時（日本時間・
+  チャンネル・本文つき）で答える。サンプルや検索結果の日付から
+  推測しない
 - **`/me` 理解度メーター** — Bot が自分をどれくらい理解しているかを、
   理解度 % と内訳（呼ばれ方のカバー・発言の埋め込み状況・名前や
   別名の記録・サーバー Wiki の人物記事・人物関係）で表示する。
@@ -87,7 +91,24 @@
 
 ### ツールと運用
 
-- **読み取り専用 Web ツール** — Web 検索・ページ取得・Wikipedia
+- **読み取り専用 Web ツール** — Web 検索・ページ取得・Wikipedia。
+  検索クエリや取得 URL は、会話の私的文脈がそのままコピーされて
+  いないか検査してから送る（コピー検出型のガード）
+- **実ブラウザ検索フォールバック** — Web 検索の HTTP 経路が
+  空振り・ブロックされたときだけ、実 Chromium を起動して検索
+  結果ページの描画 DOM から結果を読む（ふだんは起動しない）
+- **現在時刻と天気のツール** — 時刻は日本時間を既定として扱い、
+  天気は Open-Meteo（キー不要）から取得する
+- **回答モデルの切り替え** — `/model` でユーザーごとに回答モデルを
+  切り替えられる。外部コーディングエージェント（Devin）を
+  ローカルブリッジ経由の回答バックエンドとして選ぶこともできる
+- **モデレーション** — ポリシー違反を本人に見えないポイント制で
+  記録し、蓄積で24時間の無反応化、重大な違反は即ブラックリスト
+  （ルールは `POLICY.md`）。ブラックリストは DB 管理で、オーナー
+  専用 `/blacklist` から追加・削除・一覧ができる
+- **サーバー Wiki 整備人** — Wiki の各項目を出典の発言ログと
+  照合して巡回し、古い・矛盾・根拠なしの項目を証拠つきで
+  修正・削除する裏方プロセス（回答経路とは独立）
 - **使い捨て Docker サンドボックス** — コマンド実行は隔離コンテナ内。
   既定で無効化も可
 - **オーナー専用の自己改善** — `/improve` から承認付き PR を作る
@@ -127,6 +148,9 @@ Wiki 生成は裏側で進み、応答経路は蓄積済みの索引とスナッ
 | `/status` | 学習状況（総メッセージ数・学習人数・チャンネル数・学習率・サーバー Wiki 記事数など）を表示（自分だけ表示） |
 | `/limit` | ChatGPT/Codex サブスクリプションの利用枠（5 時間枠・週間枠の残り % とリセット時刻）を表示（自分だけ表示） |
 | `/me` | Bot が自分をどれくらい理解しているかを、理解度 % と内訳で表示（自分だけ表示） |
+| `/model` | 自分の回答に使うモデルを切り替える（自分だけ表示） |
+| `/rank` | サーバーのメッセージ数ランキング（1〜5位、1位は詳細つき）を表示（自分だけ表示） |
+| `/blacklist` | オーナー専用: ブラックリストの追加・削除・一覧（自分だけ表示） |
 | `/search` | 閲覧できるサーバーログを検索 |
 | `/wiki` | サーバー Wiki（人物・出来事）を自分だけに表示 |
 | `/prompt` | 固定の system prompt を表示 |
@@ -228,6 +252,9 @@ bash run.sh     # deploy.env を読み込んで Bot を起動
 | `SERVER_LOG_EMBEDDER` | 埋め込みの実行主体: 空 = Bot 内蔵 / `off` = 別プロセスのワーカーに任せる |
 | `SERVER_LOG_EMBEDDING_MODEL` | 埋め込みモデル（Hugging Face のモデル名） |
 | `SERVER_LOG_HYBRID_MODEL` / `SERVER_LOG_HYBRID_ONNX_DIR` | ハイブリッド検索の第2モデル。両方を設定したときだけ有効 |
+| `WEB_SEARCH_BROWSER` | 実ブラウザ検索フォールバックの有効化（`off` で無効。既定は有効） |
+| `DEVIN_BRIDGE_URL` / `DEVIN_BRIDGE_ENV` / `DEVIN_BRIDGE_SESSIONS_DIR` | Devin 回答バックエンド用のローカルブリッジ接続先（任意） |
+| `SERVER_WIKI_CURATOR_BACKEND` / `SERVER_WIKI_CURATOR_MODEL` | サーバー Wiki 整備人のバックエンドとモデル（任意） |
 
 サンドボックス、自己改善（`/improve`）、プロキシ用の変数は
 `deploy.env.example` の各セクションを参照してください。
@@ -256,6 +283,10 @@ deploy.env.example 設定の雛形（全項目・プレースホルダ）
 | `prefetch.py` | 話題・中心人物の根拠の先読みキャッシュ |
 | `understanding.py` | `/me` の理解度計測と、優先対象への裏処理 |
 | `server_wiki.py` / `member_wiki.py` | サーバー Wiki（人物・出来事）とメンバー Wiki |
+| `server_wiki_curator.py` | サーバー Wiki の巡回整備（出典照合・修正・削除） |
+| `web_browser.py` / `web_guard.py` | 実ブラウザ検索フォールバックと、外部送信前のコピー検出ガード |
+| `devin_answer.py` / `model_overrides.py` | Devin 回答バックエンドと、ユーザーごとのモデル上書き |
+| `blacklist.py` / `moderation.py` / `ranking.py` | ブラックリスト、ポイント制モデレーション、`/rank` 集計 |
 | `local_embedder.py` | ローカル埋め込みモデルの実行 |
 | `persona.py` / `prompts.py` | ペルソナの読み込みとプロンプト本文 |
 | `updates.py` | Bot 自身の更新履歴（自己申告の単一の出典） |
@@ -282,6 +313,7 @@ deploy.env.example 設定の雛形（全項目・プレースホルダ）
 
 ## ドキュメント
 
+- `POLICY.md`（ルート） — モデレーションのルール（カテゴリ・ポイント制・通知）
 - `docs/windows.md` — Windows / WSL での常駐ガイド
 - `docs/ADAPTIVE-MEMORY-ENGINE.md` / `docs/ADAPTIVE-MEMORY-ENGINE-RESEARCH.md`
   — 適応型メモリ（RAG）の設計検討
