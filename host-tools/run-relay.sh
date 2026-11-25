@@ -1,1 +1,9 @@
-IyEvYmluL2Jhc2gKIyBTdXBlcnZpc2VkIHdzLXJlbGF5OiByZXN0YXJ0IG9uIGV4aXQsIGxvZyB0byByZWxheS5sb2cuCmNkICIkKGRpcm5hbWUgIiQwIikvLi4iIHx8IGV4aXQgMQp1bGltaXQgLW4gODE5MiAyPi9kZXYvbnVsbAp3aGlsZSB0cnVlOyBkbwogICAgcHl0aG9uMyBob3N0LXRvb2xzL3dzLXJlbGF5LnB5IDE4MDgwID4+IHJlbGF5LmxvZyAyPiYxCiAgICBlY2hvICIkKGRhdGUgLUlzKSByZWxheSBleGl0ZWQgKCQ/KSwgcmVzdGFydGluZyIgPj4gcmVsYXkubG9nCiAgICBzbGVlcCAyCmRvbmUK
+#!/bin/bash
+# Supervised ws-relay: restart on exit, log to relay.log.
+cd "$(dirname "$0")/.." || exit 1
+ulimit -n 8192 2>/dev/null
+while true; do
+    python3 host-tools/ws-relay.py 18080 >> relay.log 2>&1
+    echo "$(date -Is) relay exited ($?), restarting" >> relay.log
+    sleep 2
+done

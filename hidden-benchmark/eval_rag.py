@@ -1,1 +1,201 @@
-IiIiTG9jYWwgcHJveHkgZXZhbCBmb3IgY29udmVyc2F0aW9uYWwgSmFwYW5lc2UgUkFHIChOT1QgdGhlIG9yaWdpbmFsIGdvbGQgc2V0KS4KClRoZSBvcmlnaW5hbCAxMjAtcXVlc3Rpb24gZ29sZCBzZXQgZnJvbSBkb2NzL3JhZy1iZW5jaG1hcmsubWQgaXMgbm90IGluIHRoZQpyZXBvLCBzbyB0aGlzIGJ1aWxkcyBhIGRldGVybWluaXN0aWMgc3ludGhldGljIGNvcnB1cyBpbiB0aGUgc2FtZSBzcGlyaXQ6CmdvbGQgbWVzc2FnZXMgd2l0aCBkaXN0aW5jdGl2ZSBjb250ZW50ICsgZ2VuZXJpYyBkaXN0cmFjdG9yIGNoYXR0ZXIsIGFuZApxdWVyaWVzIHNwbGl0IGludG8ga2V5d29yZCAvIHBhcmFwaHJhc2UgLyB3aG8gLyB0ZW1wb3JhbCBjYXRlZ29yaWVzLgpEZW5zZSBzaWRlIHVzZXMgYSBjaGFyYWN0ZXItYmlncmFtIGhhc2hpbmcgZW1iZWRkZXIgYXMgYSBsb2NhbCBwcm94eSBmb3IgRTUuCk1ldHJpY3MgZm9sbG93IHRoZSBiZW5jaG1hcmsgZG9jOiBSQGsgPSBmcmFjdGlvbiBvZiBxdWVyaWVzIHdpdGggYW55IGdvbGQKaWQgaW4gdG9wIGsuCgpVc2FnZTogLnZlbnYvYmluL3B5dGhvbiBoaWRkZW4tYmVuY2htYXJrL2V2YWxfcmFnLnB5IFstLWpzb24gb3V0Lmpzb25dCiIiIgppbXBvcnQgaGFzaGxpYgppbXBvcnQganNvbgppbXBvcnQgc3lzCmltcG9ydCB0ZW1wZmlsZQppbXBvcnQgdGltZQpmcm9tIHBhdGhsaWIgaW1wb3J0IFBhdGgKCnN5cy5wYXRoLmluc2VydCgwLCBzdHIoUGF0aChfX2ZpbGVfXykucmVzb2x2ZSgpLnBhcmVudHNbMV0pKQoKZnJvbSBuZXp1Ym90X2Rpc2Nyb2Quc2VydmVyX2xvZyBpbXBvcnQgU2VydmVyTG9nLCBiaWdyYW1zICAjIG5vcWE6IEU0MDIKZnJvbSBuZXp1Ym90X2Rpc2Nyb2Quc2VydmVyX2xvZ19jb250ZXh0IGltcG9ydCByZXNvbHZlX3Blb3BsZSAgIyBub3FhOiBFNDAyCgpESU1TID0gMTI4CgoKY2xhc3MgQmlncmFtRW1iZWRkZXI6CiAgICAiIiJEZXRlcm1pbmlzdGljIGJhZy1vZi1iaWdyYW1zIGhhc2hpbmcgZW1iZWRkZXIgKGxvY2FsIGRlbnNlIHByb3h5KS4iIiIKCiAgICBkZWYgZW1iZWQoc2VsZiwgdGV4dHMpOgogICAgICAgIGZvciB0ZXh0IGluIHRleHRzOgogICAgICAgICAgICB2ZWMgPSBbMC4wXSAqIERJTVMKICAgICAgICAgICAgZm9yIHRva2VuIGluIGJpZ3JhbXModGV4dCk6CiAgICAgICAgICAgICAgICBkaWdlc3QgPSBoYXNobGliLm1kNSh0b2tlbi5lbmNvZGUoKSkuZGlnZXN0KCkKICAgICAgICAgICAgICAgIHZlY1tpbnQuZnJvbV9ieXRlcyhkaWdlc3RbOjJdLCAibGl0dGxlIikgJSBESU1TXSArPSAxLjAKICAgICAgICAgICAgICAgIHZlY1tpbnQuZnJvbV9ieXRlcyhkaWdlc3RbMjo0XSwgImxpdHRsZSIpICUgRElNU10gKz0gMC41CiAgICAgICAgICAgIHlpZWxkIHZlYwoKCkFVVEhPUlMgPSB7CiAgICAiYWxpY2UiOiB7ImlkIjogIjIwIiwgInVzZXJuYW1lIjogImFsaWNlIiwgImdsb2JhbF9uYW1lIjogIkFsaWNlIiwgIm5pY2siOiAi44GC44KK44GZIn0sCiAgICAiYm9iIjogeyJpZCI6ICIyMSIsICJ1c2VybmFtZSI6ICJib2IiLCAiZ2xvYmFsX25hbWUiOiAiQm9iIn0sCiAgICAiY2Fyb2wiOiB7ImlkIjogIjIyIiwgInVzZXJuYW1lIjogImNhcm9sIiwgImdsb2JhbF9uYW1lIjogIkNhcm9sIiwgIm5pY2siOiAi44GN44KD44KNIn0sCiAgICAiZGF2ZSI6IHsiaWQiOiAiMjMiLCAidXNlcm5hbWUiOiAiZGF2ZSIsICJnbG9iYWxfbmFtZSI6ICJEYXZlIn0sCiAgICAidmV4IjogeyJpZCI6ICIzMCIsICJ1c2VybmFtZSI6ICJ2ZXhib3QiLCAiZ2xvYmFsX25hbWUiOiAiVmV444Gh44KD44KT44CQ5YWs5byPYm9044CRIiwKICAgICAgICAgICAgImJvdCI6IFRydWV9LAp9CgpHT0xEID0gWwogICAgKCJrYiIsICJhbGljZSIsICIyMDI2LTExLTEwIiwgIuiHquS9nOOCreODvOODnOODvOODieOBrumdmembu+WuuemHj+OCueOCpOODg+ODgeOCkuWfuuadv+OBi+OCieioreioiOOBl+ebtOOBl+OBnyIpLAogICAgKCJydXN0IiwgImJvYiIsICIyMDI2LTEwLTAyIiwgIlJ1c3Tjgafmm7jjgYTjgZ/mpJzntKLjgqjjg7Pjgrjjg7Pjga7ou6Lnva7jgqTjg7Pjg4fjg4Pjgq/jgrnjgYzjgoTjgaPjgajli5XjgYTjgZ8iKSwKICAgICgiY2F0IiwgImNhcm9sIiwgIjIwMjYtMDktMTUiLCAi5L+d6K2354yr44Gu44Of44Kx44KS5YuV54mp55eF6Zmi44Gr6YCj44KM44Gm6KGM44Gj44Gf44KJ6IWO6IeT44Gu5pWw5YCk44GM5pS55ZaE44GX44Gm44GfIiksCiAgICAoImNhbXAiLCAiZGF2ZSIsICIyMDI1LTExLTIwIiwgIuWOu+W5tOOBr+mYv+iYh+OBp+OCreODo+ODs+ODl+OBl+OBpuaYn+epuuOCkuimi+OBquOBjOOCieeEmuOBjeeBq+OCkuOBl+OBnyIpLAogICAgKCJwaWFubyIsICJhbGljZSIsICIyMDI2LTA4LTAxIiwgIuODlOOCouODjuOBrueZuuihqOS8muOBp+OCt+ODp+ODkeODs+OBruWknOaDs+absuOCkuaal+itnOOBp+W8vuOBjeWIh+OBo+OBnyIpLAogICAgKCJyYW1lbiIsICJib2IiLCAiMjAyNi0xMS0wMSIsICLkuozpg47ns7vjg6njg7zjg6Hjg7Pjga7kubPljJbjgrnjg7zjg5fjgpLlrrbjgaflho3nj77jgZnjgovjga7jgavkuInlm57lpLHmlZfjgZfjgZ8iKSwKICAgICgidmlzYSIsICJjYXJvbCIsICIyMDI1LTA2LTEwIiwgIuWPsOa5vuaXheihjOOBruODk+OCtueUs+iri+OBp+aMh+e0i+eZu+mMsuOBruOBn+OCgeOBq+mgmOS6i+mkqOOBvuOBp+ihjOOBo+OBnyIpLAogICAgKCJnbyIsICJkYXZlIiwgIjIwMjYtMDUtMDUiLCAi5Zuy56KB44Gu5a6a55+z44KS6Kaa44GI44KL44Gf44KB44Gr6Kmw56KB44KS5q+O5pelMzDllY/op6PjgYTjgabjgYTjgosiKSwKICAgICgicGxhbnQiLCAiYWxpY2UiLCAiMjAyNi0wNC0xOCIsICLjg5njg6njg7Pjg4Djga7jg5Djgrjjg6vjgYzjgqLjg5bjg6njg6DjgrfjgavjgoTjgonjgozjgablhajmu4XjgZfjgZ8iKSwKICAgICgibWFyYXRob24iLCAiYm9iIiwgIjIwMjUtMTItMDEiLCAi56aP5bKh44Oe44Op44K944Oz44Gn6Ieq5bex44OZ44K544OI44KSNOWIhuabtOaWsOOBl+OBpuWujOi1sOOBl+OBnyIpLApdCgpESVNUUkFDVE9SUyA9IFsKICAgICLku4rml6Xjga7pgLLmjZfjgafjgZnjgIHjg4bjgrnjg4jjgpLpgJrjgZfjgb7jgZfjgZ8iLCAi44Gd44Gu44OQ44Kw5piO5pel6KaL44G+44GZIiwgIuS8muitsOOBruaZgumWk+WkieabtOOBq+OBquOBo+OBn+OCieOBl+OBhCIsCiAgICAi44GK44Gk44GL44KM44GV44G+44Gn44GZIiwgIuOBneOCjOOBhOOBhOOBp+OBmeOBrSIsICLpgLHmnKvjgarjgavjgZfjgabjgZ/vvJ8iLCAi6YCy5o2X44Gp44GG44Gn44GZ44GLIiwKICAgICLjg6njg7zjg6Hjg7Ppo5/jgbnjgZ/jgYQiLCAi54yr44GL44KP44GE44GEIiwgIuaXheihjOihjOOBjeOBn+OBhOOBqiIsICLjgq3jg7zjg5zjg7zjg4nmlrDjgZfjgYTjga7osrfjgaPjgZ8iLAogICAgIuODlOOCouODjue3tOe/kuOBl+OBpuOCiyIsICLjgq3jg6Pjg7Pjg5fpgZPlhbfjgZ3jgo3jgYjjgZ/jgYQiLCAi5pyA6L+R5b+Z44GX44GP44Gm5YWo54S25a+d44Gm44Gq44GEIiwKICAgICLjgZ3jga7ku7bjga/liY3jgavoqbHjgZfjgZ/msJfjgYzjgZnjgosiLCAi5LqG6Kej44Gn44GZIiwgIuOBguOBqOOBp+eiuuiqjeOBl+OBvuOBmSIsICLjgZnjgZTjgYTjgZjjgoPjgpMiLAogICAgIuODnuODqeOCveODs+i1sOOCi+S6uuWwiuaVrOOBmeOCiyIsICLmpI3nianogrLjgabjgovjga7pm6PjgZfjgYTjgojjga0iLApdCgoKZGVmIHJlY29yZChudW1iZXIsIGF1dGhvcl9rZXksIGRhdGUsIHRleHQsIGNoYW5uZWw9IjEwIik6CiAgICByZXR1cm4gewogICAgICAgICJpZCI6IHN0cihudW1iZXIpLCAiZ3VpbGRfaWQiOiAiMTAwIiwgImNoYW5uZWxfaWQiOiBjaGFubmVsLAogICAgICAgICJfY2hhbm5lbCI6ICJnZW5lcmFsIiBpZiBjaGFubmVsID09ICIxMCIgZWxzZSAicHJpdmF0ZSIsICJfcGFyZW50IjogImRldiIsCiAgICAgICAgImF1dGhvciI6IEFVVEhPUlNbYXV0aG9yX2tleV0sICJ0aW1lc3RhbXAiOiBmIntkYXRlfVQxMjowMDowMCswMDowMCIsCiAgICAgICAgImNvbnRlbnQiOiB0ZXh0LAogICAgfQoKCmRlZiBidWlsZF9zdG9yZShyb290KToKICAgIHN0b3JlID0gU2VydmVyTG9nKHJvb3QgLyAic2VydmVyX2xvZy5kYiIsIGd1aWxkX2lkPSIxMDAiLAogICAgICAgICAgICAgICAgICAgICAgbW9kZWw9ImludGZsb2F0L211bHRpbGluZ3VhbC1lNS1sYXJnZSIsIGVtYmVkZGVyPUJpZ3JhbUVtYmVkZGVyKCkpCiAgICByb3dzID0gW10KICAgIGdvbGRfaWRzID0ge30KICAgIG4gPSAxMDAwCiAgICBmb3Iga2V5LCBhdXRob3IsIGRhdGUsIHRleHQgaW4gR09MRDoKICAgICAgICBuICs9IDEKICAgICAgICBnb2xkX2lkc1trZXldID0gc3RyKG4pCiAgICAgICAgcm93cy5hcHBlbmQocmVjb3JkKG4sIGF1dGhvciwgZGF0ZSwgdGV4dCwgY2hhbm5lbD0iMTAiIGlmIG4gJSAyIGVsc2UgIjExIikpCiAgICBhdXRob3JzID0gbGlzdChBVVRIT1JTKQogICAgZm9yIGkgaW4gcmFuZ2UoNTAwKToKICAgICAgICBuICs9IDEKICAgICAgICByb3dzLmFwcGVuZChyZWNvcmQobiwgYXV0aG9yc1tpICUgbGVuKGF1dGhvcnMpXSwgIjIwMjYtMCVkLTE1IiAlICgxICsgaSAlIDkpLAogICAgICAgICAgICAgICAgICAgICAgICAgICBESVNUUkFDVE9SU1tpICUgbGVuKERJU1RSQUNUT1JTKV0gKyBmIiAoe2l9KSIsCiAgICAgICAgICAgICAgICAgICAgICAgICAgIGNoYW5uZWw9IjEwIiBpZiBpICUgMyBlbHNlICIxMSIpKQogICAgc3RvcmUudXBzZXJ0X21hbnkocm93cykKICAgIHN0b3JlLmVtYmVkX3BlbmRpbmcoKQogICAgcmV0dXJuIHN0b3JlLCBnb2xkX2lkcwoKClFVRVJJRVMgPSBbCiAgICAoImtleXdvcmQiLCAi6Z2Z6Zu75a656YeP44K544Kk44OD44OBIiwgImtiIiksCiAgICAoImtleXdvcmQiLCAi6Lui572u44Kk44Oz44OH44OD44Kv44K5IiwgInJ1c3QiKSwKICAgICgia2V5d29yZCIsICLohY7oh5Pjga7mlbDlgKQiLCAiY2F0IiksCiAgICAoImtleXdvcmQiLCAi44K344On44OR44Oz44Gu5aSc5oOz5puyIiwgInBpYW5vIiksCiAgICAoImtleXdvcmQiLCAi5Lmz5YyW44K544O844OXIiwgInJhbWVuIiksCiAgICAoImtleXdvcmQiLCAi5oyH57SL55m76YyyIOmgmOS6i+mkqCIsICJ2aXNhIiksCiAgICAoImtleXdvcmQiLCAi6Kmw56KBIiwgImdvIiksCiAgICAoImtleXdvcmQiLCAi44Ki44OW44Op44Og44K3IOWFqOa7hSIsICJwbGFudCIpLAogICAgKCJwYXJhcGhyYXNlIiwgIuOCreODvOODnOODvOODieOBruOCueOCpOODg+ODgeOCkuiHquWIhuOBp+ioreioiOOBl+OBn+S6uuOBhOOBn+OCiOOBrSIsICJrYiIpLAogICAgKCJwYXJhcGhyYXNlIiwgIuaknOe0ouOBruS7lee1hOOBv+OCklJ1c3TjgafkvZzjgaPjgZ/oqbEiLCAicnVzdCIpLAogICAgKCJwYXJhcGhyYXNlIiwgIueMq+OCkueXhemZouOBq+mAo+OCjOOBpuihjOOBo+OBn+aZguOBruipsSIsICJjYXQiKSwKICAgICgicGFyYXBocmFzZSIsICLjg5TjgqLjg47jga7nmbrooajkvJrjgafmmpforZzjgZfjgZ/oqbEiLCAicGlhbm8iKSwKICAgICgicGFyYXBocmFzZSIsICLlrrbjgafkuozpg47ns7vjgpLkvZzjgo3jgYbjgajjgZfjgablpLHmlZfjgZfjgZ/oqbEiLCAicmFtZW4iKSwKICAgICgicGFyYXBocmFzZSIsICLlj7Dmub7jgavooYzjgY/jgZ/jgoHjga7miYvntprjgY3jgafpoJjkuovppKjjgavooYzjgaPjgZ/oqbEiLCAidmlzYSIpLAogICAgKCJwYXJhcGhyYXNlIiwgIuODmeODqeODs+ODgOOBruODj+ODvOODluOBjOiZq+OBq+OChOOCieOCjOOBn+ipsSIsICJwbGFudCIpLAogICAgKCJwYXJhcGhyYXNlIiwgIuODnuODqeOCveODs+OBp+iHquW3seODmeOCueODiOWHuuOBl+OBn+ipsSIsICJtYXJhdGhvbiIpLAogICAgKCJ3aG8iLCAi6Z2Z6Zu75a656YeP44K544Kk44OD44OB44Gj44Gm6Kqw44GM6KiA44Gj44Gm44Gf77yfIiwgImtiIiksCiAgICAoIndobyIsICJib2LjgYzliY3jgavoqIDjgaPjgabjgZ/mpJzntKLjgqjjg7Pjgrjjg7Pjga7oqbEiLCAicnVzdCIpLAogICAgKCJ3aG8iLCAi5L+d6K2354yr44KS55eF6Zmi44Gr6YCj44KM44Gm6KGM44Gj44Gf44Gu6Kqw44Gg44Gj44GRIiwgImNhdCIpLAogICAgKCJ3aG8iLCAiYWxpY2XjgYzliY3jgavoqIDjgaPjgabjgZ/jg5TjgqLjg47jga7nmbrooajkvJrjga7oqbEiLCAicGlhbm8iKSwKICAgICgid2hvIiwgIuS6jOmDjuezu+ODqeODvOODoeODs+OCkuWutuOBp+WGjeePvuOBl+OBn+OBo+OBpuiqsOOBjOiogOOBo+OBpuOBn++8nyIsICJyYW1lbiIpLAogICAgKCJ3aG8iLCAi5Zuy56KB44Gu6Kmw56KB44KS5q+O5pel6Kej44GE44Gm44KL44Gu6Kqw77yfIiwgImdvIiksCiAgICAoInRlbXBvcmFsIiwgIuWOu+W5tOOCreODo+ODs+ODl+OBp+aYn+epuuOCkuimi+OBn+OBo+OBpuiqsOOBjOiogOOBo+OBpuOBn++8nyIsICJjYW1wIiksCiAgICAoInRlbXBvcmFsIiwgIuWOu+W5tOODnuODqeOCveODs+OBp+iHquW3seODmeOCueODiOWHuuOBl+OBn+ipsSIsICJtYXJhdGhvbiIpLAogICAgKCJ0ZW1wb3JhbCIsICLmnIDov5Hjg6njg7zjg6Hjg7Pjga7lho3nj77jgavlpLHmlZfjgZfjgZ/oqbEiLCAicmFtZW4iKSwKICAgICgidGVtcG9yYWwiLCAi5pyA6L+R44Kt44O844Oc44O844OJ44Gu44K544Kk44OD44OB6Kit6KiI44GX44Gf6KmxIiwgImtiIiksCl0KClJFU09MVVRJT04gPSBbCiAgICAoImFsaWNl44Gr44Gk44GE44Gm5pWZ44GI44GmIiwgWyIyMCJdKSwKICAgICgi44GC44KK44GZ44Gr44Gk44GE44GmIiwgWyIyMCJdKSwKICAgICgiYm9i44GV44KT44Gj44Gm44Gp44KT44Gq5Lq6IiwgWyIyMSJdKSwKICAgICgi44GN44KD44KN44Gr44Gk44GE44Gm5pWZ44GI44GmIiwgWyIyMiJdKSwKICAgICgiVmV444Gj44Gm44Gp44GG5oCd44GG77yfIiwgWyIzMCJdKSwKICAgICgidmV444Gr44Gk44GE44GmIiwgWyIzMCJdKSwKICAgICgidmV4Ym9044Gr44Gk44GE44GmIiwgWyIzMCJdKSwKICAgICgi77yh77ys77yp77yj77yl44Gr44Gk44GE44GmIiwgWyIyMCJdKSwKICAgICgibWFsaWNl44Gr44Gk44GE44GmIiwgW10pLAogICAgKCLoqrDjgYvnn6XjgonjgarjgYTkurrjgavjgaTjgYTjgaYiLCBbXSksCl0KCgpkZWYgbWV0cmljcyhzdG9yZSwgZ29sZF9pZHMpOgogICAgcGVyX2NhdGVnb3J5ID0ge30KICAgIGxhdGVuY2llcyA9IHt9CiAgICBmb3IgY2F0ZWdvcnksIHF1ZXJ5LCBrZXkgaW4gUVVFUklFUzoKICAgICAgICBnb2xkID0gZ29sZF9pZHNba2V5XQogICAgICAgIHN0b3JlLnNlYXJjaChxdWVyeSwgY2hhbm5lbF9pZHM9WzEwLCAxMV0sIGxpbWl0PTEwKQogICAgICAgIHRpbWVzLCBoaXRzID0gW10sIFtdCiAgICAgICAgZm9yIF8gaW4gcmFuZ2UoMyk6CiAgICAgICAgICAgIHN0YXJ0ID0gdGltZS5wZXJmX2NvdW50ZXIoKQogICAgICAgICAgICBoaXRzID0gc3RvcmUuc2VhcmNoKHF1ZXJ5LCBjaGFubmVsX2lkcz1bMTAsIDExXSwgbGltaXQ9MTApCiAgICAgICAgICAgIHRpbWVzLmFwcGVuZCgodGltZS5wZXJmX2NvdW50ZXIoKSAtIHN0YXJ0KSAqIDEwMDApCiAgICAgICAgcmFuayA9IG5leHQoKGkgZm9yIGksIGhpdCBpbiBlbnVtZXJhdGUoaGl0cywgMSkgaWYgaGl0LmlkID09IGdvbGQpLCBOb25lKQogICAgICAgIHBlcl9jYXRlZ29yeS5zZXRkZWZhdWx0KGNhdGVnb3J5LCBbXSkuYXBwZW5kKHJhbmspCiAgICAgICAgbGF0ZW5jaWVzLnNldGRlZmF1bHQoY2F0ZWdvcnksIFtdKS5leHRlbmQodGltZXMpCiAgICBvdXQgPSB7fQogICAgYWxsX3JhbmtzID0gW10KICAgIGZvciBjYXRlZ29yeSwgcmFua3MgaW4gcGVyX2NhdGVnb3J5Lml0ZW1zKCk6CiAgICAgICAgYWxsX3JhbmtzLmV4dGVuZChyYW5rcykKICAgICAgICB0aW1lcyA9IHNvcnRlZChsYXRlbmNpZXNbY2F0ZWdvcnldKQogICAgICAgIG91dFtjYXRlZ29yeV0gPSB7CiAgICAgICAgICAgICJuIjogbGVuKHJhbmtzKSwKICAgICAgICAgICAgIlJAMSI6IHJvdW5kKHN1bSgxIGZvciByIGluIHJhbmtzIGlmIHIgPT0gMSkgLyBsZW4ocmFua3MpLCAzKSwKICAgICAgICAgICAgIlJAMTAiOiByb3VuZChzdW0oMSBmb3IgciBpbiByYW5rcyBpZiByIGFuZCByIDw9IDEwKSAvIGxlbihyYW5rcyksIDMpLAogICAgICAgICAgICAiTVJSQDEwIjogcm91bmQoc3VtKDEgLyByIGZvciByIGluIHJhbmtzIGlmIHIgYW5kIHIgPD0gMTApIC8gbGVuKHJhbmtzKSwgMyksCiAgICAgICAgICAgICJwNTBfbXMiOiByb3VuZCh0aW1lc1tsZW4odGltZXMpIC8vIDJdLCAyKSwKICAgICAgICB9CiAgICBvdXRbIkFMTCJdID0gewogICAgICAgICJuIjogbGVuKGFsbF9yYW5rcyksCiAgICAgICAgIlJAMSI6IHJvdW5kKHN1bSgxIGZvciByIGluIGFsbF9yYW5rcyBpZiByID09IDEpIC8gbGVuKGFsbF9yYW5rcyksIDMpLAogICAgICAgICJSQDEwIjogcm91bmQoc3VtKDEgZm9yIHIgaW4gYWxsX3JhbmtzIGlmIHIgYW5kIHIgPD0gMTApIC8gbGVuKGFsbF9yYW5rcyksIDMpLAogICAgICAgICJNUlJAMTAiOiByb3VuZChzdW0oMSAvIHIgZm9yIHIgaW4gYWxsX3JhbmtzIGlmIHIgYW5kIHIgPD0gMTApIC8gbGVuKGFsbF9yYW5rcyksIDMpLAogICAgfQogICAgcmV0dXJuIG91dAoKCmRlZiByZXNvbHV0aW9uKHN0b3JlKToKICAgIHJlc3VsdHMgPSBbXQogICAgZm9yIHF1ZXJ5LCBleHBlY3RlZCBpbiBSRVNPTFVUSU9OOgogICAgICAgIGdvdCA9IHJlc29sdmVfcGVvcGxlKHN0b3JlLCBbMTAsIDExXSwgcXVlcnksIDk5OSkKICAgICAgICByZXN1bHRzLmFwcGVuZCh7InF1ZXJ5IjogcXVlcnksICJleHBlY3RlZCI6IGV4cGVjdGVkLCAiZ290IjogZ290LAogICAgICAgICAgICAgICAgICAgICAgICAib2siOiBnb3QgPT0gZXhwZWN0ZWR9KQogICAgcmV0dXJuIHJlc3VsdHMKCgpkZWYgbWFpbigpOgogICAgd2l0aCB0ZW1wZmlsZS5UZW1wb3JhcnlEaXJlY3RvcnkoKSBhcyB0bXA6CiAgICAgICAgc3RvcmUsIGdvbGRfaWRzID0gYnVpbGRfc3RvcmUoUGF0aCh0bXApKQogICAgICAgIHJlc3VsdCA9IHsibWV0cmljcyI6IG1ldHJpY3Moc3RvcmUsIGdvbGRfaWRzKSwgInJlc29sdXRpb24iOiByZXNvbHV0aW9uKHN0b3JlKX0KICAgIHByaW50KGpzb24uZHVtcHMocmVzdWx0LCBlbnN1cmVfYXNjaWk9RmFsc2UsIGluZGVudD0xKSkKICAgIGlmICItLWpzb24iIGluIHN5cy5hcmd2OgogICAgICAgIFBhdGgoc3lzLmFyZ3Zbc3lzLmFyZ3YuaW5kZXgoIi0tanNvbiIpICsgMV0pLndyaXRlX3RleHQoCiAgICAgICAgICAgIGpzb24uZHVtcHMocmVzdWx0LCBlbnN1cmVfYXNjaWk9RmFsc2UsIGluZGVudD0xKSkKCgppZiBfX25hbWVfXyA9PSAiX19tYWluX18iOgogICAgbWFpbigpCg==
+"""Local proxy eval for conversational Japanese RAG (NOT the original gold set).
+
+The original 120-question gold set from docs/rag-benchmark.md is not in the
+repo, so this builds a deterministic synthetic corpus in the same spirit:
+gold messages with distinctive content + generic distractor chatter, and
+queries split into keyword / paraphrase / who / temporal categories.
+Dense side uses a character-bigram hashing embedder as a local proxy for E5.
+Metrics follow the benchmark doc: R@k = fraction of queries with any gold
+id in top k.
+
+Usage: .venv/bin/python hidden-benchmark/eval_rag.py [--json out.json]
+"""
+import hashlib
+import json
+import sys
+import tempfile
+import time
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+
+from nezubot_discrod.server_log import ServerLog, bigrams  # noqa: E402
+from nezubot_discrod.server_log_context import resolve_people  # noqa: E402
+
+DIMS = 128
+
+
+class BigramEmbedder:
+    """Deterministic bag-of-bigrams hashing embedder (local dense proxy)."""
+
+    def embed(self, texts):
+        for text in texts:
+            vec = [0.0] * DIMS
+            for token in bigrams(text):
+                digest = hashlib.md5(token.encode()).digest()
+                vec[int.from_bytes(digest[:2], "little") % DIMS] += 1.0
+                vec[int.from_bytes(digest[2:4], "little") % DIMS] += 0.5
+            yield vec
+
+
+AUTHORS = {
+    "alice": {"id": "20", "username": "alice", "global_name": "Alice", "nick": "ありす"},
+    "bob": {"id": "21", "username": "bob", "global_name": "Bob"},
+    "carol": {"id": "22", "username": "carol", "global_name": "Carol", "nick": "きゃろ"},
+    "dave": {"id": "23", "username": "dave", "global_name": "Dave"},
+    "vex": {"id": "30", "username": "vexbot", "global_name": "Vexちゃん【公式bot】",
+            "bot": True},
+}
+
+GOLD = [
+    ("kb", "alice", "2026-11-10", "自作キーボードの静電容量スイッチを基板から設計し直した"),
+    ("rust", "bob", "2026-10-02", "Rustで書いた検索エンジンの転置インデックスがやっと動いた"),
+    ("cat", "carol", "2026-09-15", "保護猫のミケを動物病院に連れて行ったら腎臓の数値が改善してた"),
+    ("camp", "dave", "2025-11-20", "去年は阿蘇でキャンプして星空を見ながら焚き火をした"),
+    ("piano", "alice", "2026-08-01", "ピアノの発表会でショパンの夜想曲を暗譜で弾き切った"),
+    ("ramen", "bob", "2026-11-01", "二郎系ラーメンの乳化スープを家で再現するのに三回失敗した"),
+    ("visa", "carol", "2025-06-10", "台湾旅行のビザ申請で指紋登録のために領事館まで行った"),
+    ("go", "dave", "2026-05-05", "囲碁の定石を覚えるために詰碁を毎日30問解いている"),
+    ("plant", "alice", "2026-04-18", "ベランダのバジルがアブラムシにやられて全滅した"),
+    ("marathon", "bob", "2025-12-01", "福岡マラソンで自己ベストを4分更新して完走した"),
+]
+
+DISTRACTORS = [
+    "今日の進捗です、テストを通しました", "そのバグ明日見ます", "会議の時間変更になったらしい",
+    "おつかれさまです", "それいいですね", "週末なにしてた？", "進捗どうですか",
+    "ラーメン食べたい", "猫かわいい", "旅行行きたいな", "キーボード新しいの買った",
+    "ピアノ練習してる", "キャンプ道具そろえたい", "最近忙しくて全然寝てない",
+    "その件は前に話した気がする", "了解です", "あとで確認します", "すごいじゃん",
+    "マラソン走る人尊敬する", "植物育てるの難しいよね",
+]
+
+
+def record(number, author_key, date, text, channel="10"):
+    return {
+        "id": str(number), "guild_id": "100", "channel_id": channel,
+        "_channel": "general" if channel == "10" else "private", "_parent": "dev",
+        "author": AUTHORS[author_key], "timestamp": f"{date}T12:00:00+00:00",
+        "content": text,
+    }
+
+
+def build_store(root):
+    store = ServerLog(root / "server_log.db", guild_id="100",
+                      model="intfloat/multilingual-e5-large", embedder=BigramEmbedder())
+    rows = []
+    gold_ids = {}
+    n = 1000
+    for key, author, date, text in GOLD:
+        n += 1
+        gold_ids[key] = str(n)
+        rows.append(record(n, author, date, text, channel="10" if n % 2 else "11"))
+    authors = list(AUTHORS)
+    for i in range(500):
+        n += 1
+        rows.append(record(n, authors[i % len(authors)], "2026-0%d-15" % (1 + i % 9),
+                           DISTRACTORS[i % len(DISTRACTORS)] + f" ({i})",
+                           channel="10" if i % 3 else "11"))
+    store.upsert_many(rows)
+    store.embed_pending()
+    return store, gold_ids
+
+
+QUERIES = [
+    ("keyword", "静電容量スイッチ", "kb"),
+    ("keyword", "転置インデックス", "rust"),
+    ("keyword", "腎臓の数値", "cat"),
+    ("keyword", "ショパンの夜想曲", "piano"),
+    ("keyword", "乳化スープ", "ramen"),
+    ("keyword", "指紋登録 領事館", "visa"),
+    ("keyword", "詰碁", "go"),
+    ("keyword", "アブラムシ 全滅", "plant"),
+    ("paraphrase", "キーボードのスイッチを自分で設計した人いたよね", "kb"),
+    ("paraphrase", "検索の仕組みをRustで作った話", "rust"),
+    ("paraphrase", "猫を病院に連れて行った時の話", "cat"),
+    ("paraphrase", "ピアノの発表会で暗譜した話", "piano"),
+    ("paraphrase", "家で二郎系を作ろうとして失敗した話", "ramen"),
+    ("paraphrase", "台湾に行くための手続きで領事館に行った話", "visa"),
+    ("paraphrase", "ベランダのハーブが虫にやられた話", "plant"),
+    ("paraphrase", "マラソンで自己ベスト出した話", "marathon"),
+    ("who", "静電容量スイッチって誰が言ってた？", "kb"),
+    ("who", "bobが前に言ってた検索エンジンの話", "rust"),
+    ("who", "保護猫を病院に連れて行ったの誰だっけ", "cat"),
+    ("who", "aliceが前に言ってたピアノの発表会の話", "piano"),
+    ("who", "二郎系ラーメンを家で再現したって誰が言ってた？", "ramen"),
+    ("who", "囲碁の詰碁を毎日解いてるの誰？", "go"),
+    ("temporal", "去年キャンプで星空を見たって誰が言ってた？", "camp"),
+    ("temporal", "去年マラソンで自己ベスト出した話", "marathon"),
+    ("temporal", "最近ラーメンの再現に失敗した話", "ramen"),
+    ("temporal", "最近キーボードのスイッチ設計した話", "kb"),
+]
+
+RESOLUTION = [
+    ("aliceについて教えて", ["20"]),
+    ("ありすについて", ["20"]),
+    ("bobさんってどんな人", ["21"]),
+    ("きゃろについて教えて", ["22"]),
+    ("Vexってどう思う？", ["30"]),
+    ("vexについて", ["30"]),
+    ("vexbotについて", ["30"]),
+    ("ＡＬＩＣＥについて", ["20"]),
+    ("maliceについて", []),
+    ("誰か知らない人について", []),
+]
+
+
+def metrics(store, gold_ids):
+    per_category = {}
+    latencies = {}
+    for category, query, key in QUERIES:
+        gold = gold_ids[key]
+        store.search(query, channel_ids=[10, 11], limit=10)
+        times, hits = [], []
+        for _ in range(3):
+            start = time.perf_counter()
+            hits = store.search(query, channel_ids=[10, 11], limit=10)
+            times.append((time.perf_counter() - start) * 1000)
+        rank = next((i for i, hit in enumerate(hits, 1) if hit.id == gold), None)
+        per_category.setdefault(category, []).append(rank)
+        latencies.setdefault(category, []).extend(times)
+    out = {}
+    all_ranks = []
+    for category, ranks in per_category.items():
+        all_ranks.extend(ranks)
+        times = sorted(latencies[category])
+        out[category] = {
+            "n": len(ranks),
+            "R@1": round(sum(1 for r in ranks if r == 1) / len(ranks), 3),
+            "R@10": round(sum(1 for r in ranks if r and r <= 10) / len(ranks), 3),
+            "MRR@10": round(sum(1 / r for r in ranks if r and r <= 10) / len(ranks), 3),
+            "p50_ms": round(times[len(times) // 2], 2),
+        }
+    out["ALL"] = {
+        "n": len(all_ranks),
+        "R@1": round(sum(1 for r in all_ranks if r == 1) / len(all_ranks), 3),
+        "R@10": round(sum(1 for r in all_ranks if r and r <= 10) / len(all_ranks), 3),
+        "MRR@10": round(sum(1 / r for r in all_ranks if r and r <= 10) / len(all_ranks), 3),
+    }
+    return out
+
+
+def resolution(store):
+    results = []
+    for query, expected in RESOLUTION:
+        got = resolve_people(store, [10, 11], query, 999)
+        results.append({"query": query, "expected": expected, "got": got,
+                        "ok": got == expected})
+    return results
+
+
+def main():
+    with tempfile.TemporaryDirectory() as tmp:
+        store, gold_ids = build_store(Path(tmp))
+        result = {"metrics": metrics(store, gold_ids), "resolution": resolution(store)}
+    print(json.dumps(result, ensure_ascii=False, indent=1))
+    if "--json" in sys.argv:
+        Path(sys.argv[sys.argv.index("--json") + 1]).write_text(
+            json.dumps(result, ensure_ascii=False, indent=1))
+
+
+if __name__ == "__main__":
+    main()

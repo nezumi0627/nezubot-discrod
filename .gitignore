@@ -1,1 +1,13 @@
-LmVudgpkZXBsb3kuZW52CiouZGIKKi5kYi1qb3VybmFsCiouZGItd2FsCiouZGItc2htCioubG9nCioubnB6Ci52ZW52LwpfX3B5Y2FjaGVfXy8KKi5lZ2ctaW5mby8KLnB5dGVzdF9jYWNoZS8KLnJ1ZmZfY2FjaGUvCg==
+.env
+deploy.env
+*.db
+*.db-journal
+*.db-wal
+*.db-shm
+*.log
+*.npz
+.venv/
+__pycache__/
+*.egg-info/
+.pytest_cache/
+.ruff_cache/

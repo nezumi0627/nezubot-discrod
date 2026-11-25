@@ -1,1 +1,202 @@
-IyEvdXNyL2Jpbi9lbnYgcHl0aG9uMwoiIiJMb2NhbCBDT05ORUNUIHJlbGF5IHRoYXQgbm9ybWFsaXplcyBXZWJTb2NrZXQgMTAxIHJlc3BvbnNlcy4KClRoaXMgc2FuZGJveCdzIGVncmVzcyBwcm94eSBNSVRNcyBUTFMgYW5kIHJlLXNlcmlhbGl6ZXMgdGhlIGdhdGV3YXkncwoxMDEgcmVzcG9uc2Ugd2l0aCBgYENvbm5lY3Rpb246IHVwZ3JhZGUsIGNsb3NlYGA7IGFpb2h0dHAncyBXZWJTb2NrZXQKY2xpZW50IHJlamVjdHMgYW55dGhpbmcgYnV0IGV4YWN0bHkgYGBDb25uZWN0aW9uOiB1cGdyYWRlYGAuIFRoZSByZWxheQp0ZXJtaW5hdGVzIHRoZSBib3QncyBUTFMgd2l0aCBhIGxvY2FsIENBLCBjaGFpbnMgdGhyb3VnaCB0aGUgdXBzdHJlYW0KcHJveHksIHJld3JpdGVzIHRoZSBDb25uZWN0aW9uIGhlYWRlciBvbiB0aGUgZmlyc3QgMTAxIHJlc3BvbnNlIG9mIGEKY29ubmVjdGlvbiBvbmx5LCBhbmQgb3RoZXJ3aXNlIHBpcGVzIGJ5dGVzIHVudG91Y2hlZC4KClVzYWdlOiB3cy1yZWxheS5weSBbbGlzdGVuLXBvcnRdICAgKHVwc3RyZWFtIHRha2VuIGZyb20gSFRUUFNfUFJPWFkpCkNBIGFuZCBwZXItaG9zdCBjZXJ0cyBsaXZlIGluIH4vLm5lenVib3QtZGlzY3JvZC9yZWxheS8gKDA3MDApLgpTdGRsaWIgb25seTsgb25lIHRocmVhZCBwZXIgY29ubmVjdGlvbi4KIiIiCgppbXBvcnQgYmFzZTY0CmltcG9ydCBvcwppbXBvcnQgc29ja2V0CmltcG9ydCBzc2wKaW1wb3J0IHN1YnByb2Nlc3MKaW1wb3J0IHN5cwppbXBvcnQgdGhyZWFkaW5nCmZyb20gcGF0aGxpYiBpbXBvcnQgUGF0aApmcm9tIHVybGxpYi5wYXJzZSBpbXBvcnQgdW5xdW90ZSwgdXJsc3BsaXQKClJFTEFZX0RJUiA9IFBhdGguaG9tZSgpIC8gIi5uZXp1Ym90LWRpc2Nyb2QiIC8gInJlbGF5IgpVUFNUUkVBTSA9IHVybHNwbGl0KG9zLmVudmlyb24uZ2V0KCJIVFRQU19QUk9YWSIpIG9yIG9zLmVudmlyb24uZ2V0KCJodHRwc19wcm94eSIpIG9yICIiKQpfY2VydHM6IGRpY3Rbc3RyLCB0dXBsZVtzdHIsIHN0cl1dID0ge30KX2xvY2sgPSB0aHJlYWRpbmcuTG9jaygpCgoKZGVmIF9ydW4oKmFyZ3MpOgogICAgc3VicHJvY2Vzcy5ydW4oYXJncywgY2hlY2s9VHJ1ZSwgY2FwdHVyZV9vdXRwdXQ9VHJ1ZSkKCgpkZWYgZW5zdXJlX2NhKCk6CiAgICBSRUxBWV9ESVIubWtkaXIocGFyZW50cz1UcnVlLCBleGlzdF9vaz1UcnVlKQogICAgb3MuY2htb2QoUkVMQVlfRElSLCAwbzcwMCkKICAgIGNhX2tleSwgY2FfY3J0ID0gUkVMQVlfRElSIC8gImNhLmtleSIsIFJFTEFZX0RJUiAvICJjYS5wZW0iCiAgICBpZiBub3QgY2FfY3J0LmV4aXN0cygpOgogICAgICAgIF9ydW4oIm9wZW5zc2wiLCAicmVxIiwgIi14NTA5IiwgIi1uZXdrZXkiLCAicnNhOjIwNDgiLCAiLW5vZGVzIiwKICAgICAgICAgICAgICIta2V5b3V0Iiwgc3RyKGNhX2tleSksICItb3V0Iiwgc3RyKGNhX2NydCksICItZGF5cyIsICIzNjUwIiwKICAgICAgICAgICAgICItc3ViaiIsICIvQ049bmV6dWJvdC1kaXNjcm9kIGxvY2FsIHJlbGF5IENBIikKICAgICAgICBvcy5jaG1vZChjYV9rZXksIDBvNjAwKQogICAgcmV0dXJuIGNhX2tleSwgY2FfY3J0CgoKZGVmIGxlYWZfY2VydChob3N0KToKICAgIHdpdGggX2xvY2s6CiAgICAgICAgaWYgaG9zdCBpbiBfY2VydHM6CiAgICAgICAgICAgIHJldHVybiBfY2VydHNbaG9zdF0KICAgICAgICBjYV9rZXksIGNhX2NydCA9IGVuc3VyZV9jYSgpCiAgICAgICAga2V5LCBjcnQgPSBSRUxBWV9ESVIgLyBmIntob3N0fS5rZXkiLCBSRUxBWV9ESVIgLyBmIntob3N0fS5wZW0iCiAgICAgICAgY3NyLCBleHQgPSBSRUxBWV9ESVIgLyBmIntob3N0fS5jc3IiLCBSRUxBWV9ESVIgLyBmIntob3N0fS5leHQiCiAgICAgICAgaWYgbm90IGNydC5leGlzdHMoKToKICAgICAgICAgICAgZXh0LndyaXRlX3RleHQoZiJzdWJqZWN0QWx0TmFtZT1ETlM6e2hvc3R9XG4iKQogICAgICAgICAgICBfcnVuKCJvcGVuc3NsIiwgInJlcSIsICItbmV3a2V5IiwgInJzYToyMDQ4IiwgIi1ub2RlcyIsCiAgICAgICAgICAgICAgICAgIi1rZXlvdXQiLCBzdHIoa2V5KSwgIi1vdXQiLCBzdHIoY3NyKSwgIi1zdWJqIiwgZiIvQ049e2hvc3R9IikKICAgICAgICAgICAgX3J1bigib3BlbnNzbCIsICJ4NTA5IiwgIi1yZXEiLCAiLWluIiwgc3RyKGNzciksICItQ0EiLCBzdHIoY2FfY3J0KSwKICAgICAgICAgICAgICAgICAiLUNBa2V5Iiwgc3RyKGNhX2tleSksICItQ0FjcmVhdGVzZXJpYWwiLCAiLW91dCIsIHN0cihjcnQpLAogICAgICAgICAgICAgICAgICItZGF5cyIsICIzNjUwIiwgIi1leHRmaWxlIiwgc3RyKGV4dCkpCiAgICAgICAgICAgIG9zLmNobW9kKGtleSwgMG82MDApCiAgICAgICAgICAgIGNzci51bmxpbmsobWlzc2luZ19vaz1UcnVlKQogICAgICAgICAgICBleHQudW5saW5rKG1pc3Npbmdfb2s9VHJ1ZSkKICAgICAgICBfY2VydHNbaG9zdF0gPSAoc3RyKGNydCksIHN0cihrZXkpKQogICAgICAgIHJldHVybiBfY2VydHNbaG9zdF0KCgpkZWYgcmVhZF9oZWFkZXJzKHNvY2spOgogICAgYnVmID0gYiIiCiAgICB3aGlsZSBiIlxyXG5cclxuIiBub3QgaW4gYnVmIGFuZCBsZW4oYnVmKSA8IDI2MjE0NDoKICAgICAgICBjaHVuayA9IHNvY2sucmVjdig0MDk2KQogICAgICAgIGlmIG5vdCBjaHVuazoKICAgICAgICAgICAgYnJlYWsKICAgICAgICBidWYgKz0gY2h1bmsKICAgIGhlYWQsIF8sIHJlc3QgPSBidWYucGFydGl0aW9uKGIiXHJcblxyXG4iKQogICAgcmV0dXJuIGhlYWQgKyBiIlxyXG5cclxuIiwgcmVzdAoKCmRlZiBmaXhfMTAxKGhlYWQ6IGJ5dGVzKSAtPiBieXRlczoKICAgIGxpbmVzID0gaGVhZC5zcGxpdChiIlxyXG4iKQogICAgaWYgYiIgMTAxICIgbm90IGluIGxpbmVzWzBdOgogICAgICAgIHJldHVybiBoZWFkCiAgICByZXR1cm4gYiJcclxuIi5qb2luKAogICAgICAgIGIiQ29ubmVjdGlvbjogVXBncmFkZSIgaWYgbGluZS5sb3dlcigpLnN0YXJ0c3dpdGgoYiJjb25uZWN0aW9uOiIpIGVsc2UgbGluZQogICAgICAgIGZvciBsaW5lIGluIGxpbmVzCiAgICApCgoKZGVmIHB1bXAoc3JjLCBkc3QpOgogICAgdHJ5OgogICAgICAgIHdoaWxlIFRydWU6CiAgICAgICAgICAgIGRhdGEgPSBzcmMucmVjdig2NTUzNikKICAgICAgICAgICAgaWYgbm90IGRhdGE6CiAgICAgICAgICAgICAgICBicmVhawogICAgICAgICAgICBkc3Quc2VuZGFsbChkYXRhKQogICAgZXhjZXB0IChPU0Vycm9yLCBzc2wuU1NMRXJyb3IpOgogICAgICAgIHBhc3MKICAgIGZpbmFsbHk6CiAgICAgICAgZm9yIHNvY2ssIGhvdyBpbiAoKGRzdCwgc29ja2V0LlNIVVRfV1IpLCAoc3JjLCBzb2NrZXQuU0hVVF9SRCkpOgogICAgICAgICAgICB0cnk6CiAgICAgICAgICAgICAgICBzb2NrLnNodXRkb3duKGhvdykKICAgICAgICAgICAgZXhjZXB0IE9TRXJyb3I6CiAgICAgICAgICAgICAgICBwYXNzCiAgICAgICAgZm9yIHNvY2sgaW4gKHNyYywgZHN0KToKICAgICAgICAgICAgdHJ5OgogICAgICAgICAgICAgICAgc29jay5jbG9zZSgpCiAgICAgICAgICAgIGV4Y2VwdCBPU0Vycm9yOgogICAgICAgICAgICAgICAgcGFzcwoKCmRlZiBjb25uZWN0X3Vwc3RyZWFtKCk6CiAgICAiIiJDb25uZWN0IHRvIHRoZSBlZ3Jlc3MgcHJveHksIHJldHJ5aW5nIHRyYW5zaWVudCByZWZ1c2Fscy4iIiIKICAgIGltcG9ydCB0aW1lCgogICAgbGFzdCA9IE5vbmUKICAgIGZvciBfIGluIHJhbmdlKDQpOgogICAgICAgIHRyeToKICAgICAgICAgICAgcmV0dXJuIHNvY2tldC5jcmVhdGVfY29ubmVjdGlvbigoVVBTVFJFQU0uaG9zdG5hbWUsIFVQU1RSRUFNLnBvcnQpLCB0aW1lb3V0PTMwKQogICAgICAgIGV4Y2VwdCBPU0Vycm9yIGFzIGVycm9yOgogICAgICAgICAgICBsYXN0ID0gZXJyb3IKICAgICAgICAgICAgdGltZS5zbGVlcCgxKQogICAgcmFpc2UgbGFzdAoKCmRlZiBoYW5kbGUoY2xpZW50KToKICAgIHRyeToKICAgICAgICBoZWFkLCBfID0gcmVhZF9oZWFkZXJzKGNsaWVudCkKICAgICAgICBwYXJ0cyA9IGhlYWQuc3BsaXQoYiJcclxuIiwgMSlbMF0uZGVjb2RlKCJsYXRpbjEiKS5zcGxpdCgiICIpCiAgICAgICAgaWYgbGVuKHBhcnRzKSA8IDIgb3IgcGFydHNbMF0udXBwZXIoKSAhPSAiQ09OTkVDVCI6CiAgICAgICAgICAgIGNsaWVudC5zZW5kYWxsKGIiSFRUUC8xLjEgNDA1IE1ldGhvZCBOb3QgQWxsb3dlZFxyXG5cclxuIikKICAgICAgICAgICAgY2xpZW50LmNsb3NlKCkKICAgICAgICAgICAgcmV0dXJuCiAgICAgICAgaG9zdCwgXywgcG9ydCA9IHBhcnRzWzFdLnJwYXJ0aXRpb24oIjoiKQogICAgICAgIHBvcnQgPSBwb3J0IG9yICI0NDMiCgogICAgICAgIHVwc3RyZWFtID0gY29ubmVjdF91cHN0cmVhbSgpCiAgICAgICAgYXV0aCA9ICIiCiAgICAgICAgaWYgVVBTVFJFQU0udXNlcm5hbWU6CiAgICAgICAgICAgIGNyZWQgPSBmInt1bnF1b3RlKFVQU1RSRUFNLnVzZXJuYW1lKX06e3VucXVvdGUoVVBTVFJFQU0ucGFzc3dvcmQgb3IgJycpfSIKICAgICAgICAgICAgYXV0aCA9ICgiUHJveHktQXV0aG9yaXphdGlvbjogQmFzaWMgIgogICAgICAgICAgICAgICAgICAgICsgYmFzZTY0LmI2NGVuY29kZShjcmVkLmVuY29kZSgpKS5kZWNvZGUoKSArICJcclxuIikKICAgICAgICB1cHN0cmVhbS5zZW5kYWxsKAogICAgICAgICAgICBmIkNPTk5FQ1Qge2hvc3R9Ontwb3J0fSBIVFRQLzEuMVxyXG5Ib3N0OiB7aG9zdH06e3BvcnR9XHJcbnthdXRofVxyXG4iLmVuY29kZSgpKQogICAgICAgIHJlc3BfaGVhZCwgXyA9IHJlYWRfaGVhZGVycyh1cHN0cmVhbSkKICAgICAgICBpZiBiIiAyMDAgIiBub3QgaW4gcmVzcF9oZWFkLnNwbGl0KGIiXHJcbiIsIDEpWzBdOgogICAgICAgICAgICBjbGllbnQuc2VuZGFsbChiIkhUVFAvMS4xIDUwMiBCYWQgR2F0ZXdheVxyXG5cclxuIikKICAgICAgICAgICAgY2xpZW50LmNsb3NlKCkKICAgICAgICAgICAgdXBzdHJlYW0uY2xvc2UoKQogICAgICAgICAgICByZXR1cm4KICAgICAgICBjbGllbnQuc2VuZGFsbChiIkhUVFAvMS4xIDIwMCBDb25uZWN0aW9uIEVzdGFibGlzaGVkXHJcblxyXG4iKQoKICAgICAgICBjcnQsIGtleSA9IGxlYWZfY2VydChob3N0KQogICAgICAgIHNlcnZlcl9jdHggPSBzc2wuU1NMQ29udGV4dChzc2wuUFJPVE9DT0xfVExTX1NFUlZFUikKICAgICAgICBzZXJ2ZXJfY3R4LmxvYWRfY2VydF9jaGFpbihjcnQsIGtleSkKICAgICAgICB0bHNfY2xpZW50ID0gc2VydmVyX2N0eC53cmFwX3NvY2tldChjbGllbnQsIHNlcnZlcl9zaWRlPVRydWUpCgogICAgICAgIGNsaWVudF9jdHggPSBzc2wuY3JlYXRlX2RlZmF1bHRfY29udGV4dCgpCiAgICAgICAgdGxzX3VwID0gY2xpZW50X2N0eC53cmFwX3NvY2tldCh1cHN0cmVhbSwgc2VydmVyX2hvc3RuYW1lPWhvc3QpCgogICAgICAgIHJlcXVlc3QsIHJlc3QgPSByZWFkX2hlYWRlcnModGxzX2NsaWVudCkKICAgICAgICB0bHNfdXAuc2VuZGFsbChyZXF1ZXN0ICsgcmVzdCkKICAgICAgICByZXNwb25zZSwgcmVzdCA9IHJlYWRfaGVhZGVycyh0bHNfdXApCiAgICAgICAgdGxzX2NsaWVudC5zZW5kYWxsKGZpeF8xMDEocmVzcG9uc2UpICsgcmVzdCkKCiAgICAgICAgdGhyZWFkID0gdGhyZWFkaW5nLlRocmVhZCh0YXJnZXQ9cHVtcCwgYXJncz0odGxzX2NsaWVudCwgdGxzX3VwKSwgZGFlbW9uPVRydWUpCiAgICAgICAgdGhyZWFkLnN0YXJ0KCkKICAgICAgICBwdW1wKHRsc191cCwgdGxzX2NsaWVudCkKICAgICAgICB0aHJlYWQuam9pbih0aW1lb3V0PTUpCiAgICBleGNlcHQgRXhjZXB0aW9uIGFzIGVycm9yOiAgIyBub3FhOiBCTEUwMDEgLSBvbmUgYmFkIGNvbm4gbXVzdCBub3Qga2lsbCB0aGUgcmVsYXkKICAgICAgICBwcmludChmInJlbGF5OiB7ZXJyb3Ihcn0iLCBmaWxlPXN5cy5zdGRlcnIsIGZsdXNoPVRydWUpCiAgICAgICAgdHJ5OgogICAgICAgICAgICBjbGllbnQuY2xvc2UoKQogICAgICAgIGV4Y2VwdCBPU0Vycm9yOgogICAgICAgICAgICBwYXNzCgoKZGVmIG1haW4oKToKICAgIHBvcnQgPSBpbnQoc3lzLmFyZ3ZbMV0pIGlmIGxlbihzeXMuYXJndikgPiAxIGVsc2UgMTgwODAKICAgIGlmIG5vdCBVUFNUUkVBTS5ob3N0bmFtZToKICAgICAgICBwcmludCgiSFRUUFNfUFJPWFkgbm90IHNldCIsIGZpbGU9c3lzLnN0ZGVycikKICAgICAgICByYWlzZSBTeXN0ZW1FeGl0KDEpCiAgICBlbnN1cmVfY2EoKQogICAgc2VydmVyID0gc29ja2V0LnNvY2tldChzb2NrZXQuQUZfSU5FVCwgc29ja2V0LlNPQ0tfU1RSRUFNKQogICAgc2VydmVyLnNldHNvY2tvcHQoc29ja2V0LlNPTF9TT0NLRVQsIHNvY2tldC5TT19SRVVTRUFERFIsIDEpCiAgICBzZXJ2ZXIuYmluZCgoIjEyNy4wLjAuMSIsIHBvcnQpKQogICAgc2VydmVyLmxpc3Rlbig2NCkKICAgIHByaW50KGYicmVsYXkgbGlzdGVuaW5nIG9uIDEyNy4wLjAuMTp7cG9ydH0sIENBOiB7UkVMQVlfRElSIC8gJ2NhLnBlbSd9IiwgZmx1c2g9VHJ1ZSkKICAgIHdoaWxlIFRydWU6CiAgICAgICAgdHJ5OgogICAgICAgICAgICBjb25uLCBfID0gc2VydmVyLmFjY2VwdCgpCiAgICAgICAgZXhjZXB0IE9TRXJyb3IgYXMgZXJyb3I6CiAgICAgICAgICAgIHByaW50KGYicmVsYXkgYWNjZXB0OiB7ZXJyb3Ihcn0iLCBmaWxlPXN5cy5zdGRlcnIsIGZsdXNoPVRydWUpCiAgICAgICAgICAgIGltcG9ydCB0aW1lCgogICAgICAgICAgICB0aW1lLnNsZWVwKDAuNSkKICAgICAgICAgICAgY29udGludWUKICAgICAgICB0aHJlYWRpbmcuVGhyZWFkKHRhcmdldD1oYW5kbGUsIGFyZ3M9KGNvbm4sKSwgZGFlbW9uPVRydWUpLnN0YXJ0KCkKCgppZiBfX25hbWVfXyA9PSAiX19tYWluX18iOgogICAgbWFpbigpCg==
+#!/usr/bin/env python3
+"""Local CONNECT relay that normalizes WebSocket 101 responses.
+
+This sandbox's egress proxy MITMs TLS and re-serializes the gateway's
+101 response with ``Connection: upgrade, close``; aiohttp's WebSocket
+client rejects anything but exactly ``Connection: upgrade``. The relay
+terminates the bot's TLS with a local CA, chains through the upstream
+proxy, rewrites the Connection header on the first 101 response of a
+connection only, and otherwise pipes bytes untouched.
+
+Usage: ws-relay.py [listen-port]   (upstream taken from HTTPS_PROXY)
+CA and per-host certs live in ~/.nezubot-discrod/relay/ (0700).
+Stdlib only; one thread per connection.
+"""
+
+import base64
+import os
+import socket
+import ssl
+import subprocess
+import sys
+import threading
+from pathlib import Path
+from urllib.parse import unquote, urlsplit
+
+RELAY_DIR = Path.home() / ".nezubot-discrod" / "relay"
+UPSTREAM = urlsplit(os.environ.get("HTTPS_PROXY") or os.environ.get("https_proxy") or "")
+_certs: dict[str, tuple[str, str]] = {}
+_lock = threading.Lock()
+
+
+def _run(*args):
+    subprocess.run(args, check=True, capture_output=True)
+
+
+def ensure_ca():
+    RELAY_DIR.mkdir(parents=True, exist_ok=True)
+    os.chmod(RELAY_DIR, 0o700)
+    ca_key, ca_crt = RELAY_DIR / "ca.key", RELAY_DIR / "ca.pem"
+    if not ca_crt.exists():
+        _run("openssl", "req", "-x509", "-newkey", "rsa:2048", "-nodes",
+             "-keyout", str(ca_key), "-out", str(ca_crt), "-days", "3650",
+             "-subj", "/CN=nezubot-discrod local relay CA")
+        os.chmod(ca_key, 0o600)
+    return ca_key, ca_crt
+
+
+def leaf_cert(host):
+    with _lock:
+        if host in _certs:
+            return _certs[host]
+        ca_key, ca_crt = ensure_ca()
+        key, crt = RELAY_DIR / f"{host}.key", RELAY_DIR / f"{host}.pem"
+        csr, ext = RELAY_DIR / f"{host}.csr", RELAY_DIR / f"{host}.ext"
+        if not crt.exists():
+            ext.write_text(f"subjectAltName=DNS:{host}\n")
+            _run("openssl", "req", "-newkey", "rsa:2048", "-nodes",
+                 "-keyout", str(key), "-out", str(csr), "-subj", f"/CN={host}")
+            _run("openssl", "x509", "-req", "-in", str(csr), "-CA", str(ca_crt),
+                 "-CAkey", str(ca_key), "-CAcreateserial", "-out", str(crt),
+                 "-days", "3650", "-extfile", str(ext))
+            os.chmod(key, 0o600)
+            csr.unlink(missing_ok=True)
+            ext.unlink(missing_ok=True)
+        _certs[host] = (str(crt), str(key))
+        return _certs[host]
+
+
+def read_headers(sock):
+    buf = b""
+    while b"\r\n\r\n" not in buf and len(buf) < 262144:
+        chunk = sock.recv(4096)
+        if not chunk:
+            break
+        buf += chunk
+    head, _, rest = buf.partition(b"\r\n\r\n")
+    return head + b"\r\n\r\n", rest
+
+
+def fix_101(head: bytes) -> bytes:
+    lines = head.split(b"\r\n")
+    if b" 101 " not in lines[0]:
+        return head
+    return b"\r\n".join(
+        b"Connection: Upgrade" if line.lower().startswith(b"connection:") else line
+        for line in lines
+    )
+
+
+def pump(src, dst):
+    try:
+        while True:
+            data = src.recv(65536)
+            if not data:
+                break
+            dst.sendall(data)
+    except (OSError, ssl.SSLError):
+        pass
+    finally:
+        for sock, how in ((dst, socket.SHUT_WR), (src, socket.SHUT_RD)):
+            try:
+                sock.shutdown(how)
+            except OSError:
+                pass
+        for sock in (src, dst):
+            try:
+                sock.close()
+            except OSError:
+                pass
+
+
+def connect_upstream():
+    """Connect to the egress proxy, retrying transient refusals."""
+    import time
+
+    last = None
+    for _ in range(4):
+        try:
+            return socket.create_connection((UPSTREAM.hostname, UPSTREAM.port), timeout=30)
+        except OSError as error:
+            last = error
+            time.sleep(1)
+    raise last
+
+
+def handle(client):
+    try:
+        head, _ = read_headers(client)
+        parts = head.split(b"\r\n", 1)[0].decode("latin1").split(" ")
+        if len(parts) < 2 or parts[0].upper() != "CONNECT":
+            client.sendall(b"HTTP/1.1 405 Method Not Allowed\r\n\r\n")
+            client.close()
+            return
+        host, _, port = parts[1].rpartition(":")
+        port = port or "443"
+
+        upstream = connect_upstream()
+        auth = ""
+        if UPSTREAM.username:
+            cred = f"{unquote(UPSTREAM.username)}:{unquote(UPSTREAM.password or '')}"
+            auth = ("Proxy-Authorization: Basic "
+                    + base64.b64encode(cred.encode()).decode() + "\r\n")
+        upstream.sendall(
+            f"CONNECT {host}:{port} HTTP/1.1\r\nHost: {host}:{port}\r\n{auth}\r\n".encode())
+        resp_head, _ = read_headers(upstream)
+        if b" 200 " not in resp_head.split(b"\r\n", 1)[0]:
+            client.sendall(b"HTTP/1.1 502 Bad Gateway\r\n\r\n")
+            client.close()
+            upstream.close()
+            return
+        client.sendall(b"HTTP/1.1 200 Connection Established\r\n\r\n")
+
+        crt, key = leaf_cert(host)
+        server_ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+        server_ctx.load_cert_chain(crt, key)
+        tls_client = server_ctx.wrap_socket(client, server_side=True)
+
+        client_ctx = ssl.create_default_context()
+        tls_up = client_ctx.wrap_socket(upstream, server_hostname=host)
+
+        request, rest = read_headers(tls_client)
+        tls_up.sendall(request + rest)
+        response, rest = read_headers(tls_up)
+        tls_client.sendall(fix_101(response) + rest)
+
+        thread = threading.Thread(target=pump, args=(tls_client, tls_up), daemon=True)
+        thread.start()
+        pump(tls_up, tls_client)
+        thread.join(timeout=5)
+    except Exception as error:  # noqa: BLE001 - one bad conn must not kill the relay
+        print(f"relay: {error!r}", file=sys.stderr, flush=True)
+        try:
+            client.close()
+        except OSError:
+            pass
+
+
+def main():
+    port = int(sys.argv[1]) if len(sys.argv) > 1 else 18080
+    if not UPSTREAM.hostname:
+        print("HTTPS_PROXY not set", file=sys.stderr)
+        raise SystemExit(1)
+    ensure_ca()
+    server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    server.bind(("127.0.0.1", port))
+    server.listen(64)
+    print(f"relay listening on 127.0.0.1:{port}, CA: {RELAY_DIR / 'ca.pem'}", flush=True)
+    while True:
+        try:
+            conn, _ = server.accept()
+        except OSError as error:
+            print(f"relay accept: {error!r}", file=sys.stderr, flush=True)
+            import time
+
+            time.sleep(0.5)
+            continue
+        threading.Thread(target=handle, args=(conn,), daemon=True).start()
+
+
+if __name__ == "__main__":
+    main()

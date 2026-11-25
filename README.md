@@ -156,7 +156,7 @@ Wiki 生成は裏側で進み、応答経路は蓄積済みの索引とスナッ
 ## クイックスタート
 
 ```bash
-git clone <この repo の URL>
+git clone https://github.com/nezumi0627/nezubot-discrod.git
 cd nezubot-discrod
 bash setup.sh   # venv 作成＋依存インストール＋ deploy.env の雛形配置
 ```

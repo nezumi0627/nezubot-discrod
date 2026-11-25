@@ -1,1 +1,19 @@
-RlJPTSBweXRob246My4xMi1zbGltLWJvb2t3b3JtIEFTIGJhc2UKUlVOIGFwdC1nZXQgdXBkYXRlICYmIGFwdC1nZXQgaW5zdGFsbCAteSAtLW5vLWluc3RhbGwtcmVjb21tZW5kcyBcCiAgICBjb3JldXRpbHMgZmluZHV0aWxzIGdyZXAgc2VkIGdhd2sganEgY3VybCBjYS1jZXJ0aWZpY2F0ZXMgcHJvY3BzIFwKICAgICYmIHJtIC1yZiAvdmFyL2xpYi9hcHQvbGlzdHMvKgpFTlYgUFlUSE9ORE9OVFdSSVRFQllURUNPREU9MSBIT01FPS93b3JrCldPUktESVIgL3dvcmsKVVNFUiA2NTUzNDo2NTUzNApDTUQgWyIvYmluL3NoIl0KCkZST00gYmFzZSBBUyBzZWxmbW9kClVTRVIgcm9vdApDT1BZIHB5cHJvamVjdC50b21sIC9vcHQvcHJvamVjdC9weXByb2plY3QudG9tbApDT1BZIG5lenVib3RfZGlzY3JvZCAvb3B0L3Byb2plY3QvbmV6dWJvdF9kaXNjcm9kCkVOViBQQVRIPSIvb3B0L3ZlbnYvYmluOiR7UEFUSH0iIFBZVEhPTlBBVEg9L3dvcmsKUlVOIHB5dGhvbiAtbSB2ZW52IC9vcHQvdmVudiAmJiBwaXAgaW5zdGFsbCAtLW5vLWNhY2hlLWRpciAnL29wdC9wcm9qZWN0W2Rldl0nIFwKICAgICYmIHBpcCB1bmluc3RhbGwgLXkgbmV6dWJvdC1kaXNjcm9kICYmIHJtIC1yZiAvb3B0L3Byb2plY3QKVVNFUiA2NTUzNDo2NTUzNAoKRlJPTSBiYXNlIEFTIHNhbmRib3gK
+FROM python:3.12-slim-bookworm AS base
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    coreutils findutils grep sed gawk jq curl ca-certificates procps \
+    && rm -rf /var/lib/apt/lists/*
+ENV PYTHONDONTWRITEBYTECODE=1 HOME=/work
+WORKDIR /work
+USER 65534:65534
+CMD ["/bin/sh"]
+
+FROM base AS selfmod
+USER root
+COPY pyproject.toml /opt/project/pyproject.toml
+COPY nezubot_discrod /opt/project/nezubot_discrod
+ENV PATH="/opt/venv/bin:${PATH}" PYTHONPATH=/work
+RUN python -m venv /opt/venv && pip install --no-cache-dir '/opt/project[dev]' \
+    && pip uninstall -y nezubot-discrod && rm -rf /opt/project
+USER 65534:65534
+
+FROM base AS sandbox

@@ -1,1 +1,24 @@
-IyEvYmluL2Jhc2gKIyBMYXVuY2ggdGhlIGJvdCBpbiB0aGlzIHNhbmRib3ggVk0uCiMgLSBkZXBsb3kuZW52IGhvbGRzIHRoZSBjb25maWcgKDYwMCwgbmV2ZXIgY29tbWl0dGVkKQojIC0gTk9fUFJPWFkgaXMgc2FuaXRpemVkOiB0aGUgYW1iaWVudCB2YWx1ZSBjb250YWlucyBicmFja2V0ZWQgSVB2NgojICAgZW50cmllcyB0aGF0IGNyYXNoIGh0dHB4IChIRiBtb2RlbCBkb3dubG9hZCkgb3V0cmlnaHQuCiMgLSBGQVNURU1CRURfQ0FDSEVfUEFUSCBtdXN0IGxpdmUgb24gdGhlIGhvbWUgdm9sdW1lOiAvdG1wIGlzIGEgNTEyTUIKIyAgIHRtcGZzIGFuZCB0aGUgRTUgbW9kZWwgaXMgfjIuMkdCLgojIC0gVGhlIGxvY2FsIHdzLXJlbGF5IChwb3J0IDE4MDgwKSBtdXN0IGJlIHJ1bm5pbmcgZm9yIHRoZSBnYXRld2F5LgpjZCAiJChkaXJuYW1lICIkMCIpLy4uIiB8fCBleGl0IDEKc2V0IC1hCi4gLi9kZXBsb3kuZW52CnNldCArYQpleHBvcnQgTk9fUFJPWFk9bG9jYWxob3N0LDEyNy4wLjAuMQpleHBvcnQgbm9fcHJveHk9bG9jYWxob3N0LDEyNy4wLjAuMQpleHBvcnQgRkFTVEVNQkVEX0NBQ0hFX1BBVEg9IiRIT01FLy5jYWNoZS9mYXN0ZW1iZWQiCiMgU2luZ2xlLWluc3RhbmNlIGd1YXJkOiBhIHNlY29uZCBsYXVuY2ggd2hpbGUgb25lIGJvdCBpcyBhbGl2ZSBtYWtlcyBib3RoCiMgYW5zd2VyIGV2ZXJ5IG1lc3NhZ2UuIEhvbGQgYW4gZmxvY2sgZm9yIHRoZSBwcm9jZXNzIGxpZmV0aW1lIChmZCA5IGlzCiMgaW5oZXJpdGVkIGFjcm9zcyBleGVjKS4KZXhlYyA5PiIkSE9NRS8ubmV6dWJvdC1kaXNjcm9kL2JvdC5sb2NrIgppZiAhIGZsb2NrIC1uIDk7IHRoZW4KICBlY2hvICJydW4tYm90OiBhbm90aGVyIGluc3RhbmNlIGlzIGFscmVhZHkgcnVubmluZzsgcmVmdXNpbmcgdG8gc3RhcnQiID4mMgogIGV4aXQgMQpmaQpleGVjIC52ZW52L2Jpbi9uZXp1Ym90LWRpc2Nyb2QgPj4gYm90LmxvZyAyPiYxCg==
+#!/bin/bash
+# Launch the bot in this sandbox VM.
+# - deploy.env holds the config (600, never committed)
+# - NO_PROXY is sanitized: the ambient value contains bracketed IPv6
+#   entries that crash httpx (HF model download) outright.
+# - FASTEMBED_CACHE_PATH must live on the home volume: /tmp is a 512MB
+#   tmpfs and the E5 model is ~2.2GB.
+# - The local ws-relay (port 18080) must be running for the gateway.
+cd "$(dirname "$0")/.." || exit 1
+set -a
+. ./deploy.env
+set +a
+export NO_PROXY=localhost,127.0.0.1
+export no_proxy=localhost,127.0.0.1
+export FASTEMBED_CACHE_PATH="$HOME/.cache/fastembed"
+# Single-instance guard: a second launch while one bot is alive makes both
+# answer every message. Hold an flock for the process lifetime (fd 9 is
+# inherited across exec).
+exec 9>"$HOME/.nezubot-discrod/bot.lock"
+if ! flock -n 9; then
+  echo "run-bot: another instance is already running; refusing to start" >&2
+  exit 1
+fi
+exec .venv/bin/nezubot-discrod >> bot.log 2>&1
