@@ -4,6 +4,8 @@ import json
 import os
 import re
 import socket
+import threading
+import time
 from html.parser import HTMLParser
 from urllib.parse import parse_qs, quote, urlencode, urljoin, urlsplit
 
@@ -16,7 +18,14 @@ MAX_BYTES = 2 * 1024 * 1024
 MAX_TEXT = 8000
 # DuckDuckGo through an egress proxy occasionally answers very slowly
 # (25s+ observed); the search call gets a larger budget than plain fetches.
+# The budget is split across two attempts: a hung first attempt is
+# abandoned early and retried once instead of blocking the whole turn.
 SEARCH_TIMEOUT = 30
+SEARCH_ATTEMPT_TIMEOUT = 12
+# Identical searches repeat constantly ("調べてみて" follow-ups, the same
+# question asked twice); a short cache turns the repeat into a local hit.
+SEARCH_CACHE_TTL = 120
+CALL_TIMEOUT = 120
 USER_AGENT = f"{PERSONA.bot_name}/1.0" + (f" ({PERSONA.repo_url})" if PERSONA.repo_url else "")
 SEARCH_HEADERS = {
     "User-Agent": "Mozilla/5.0", "Accept": "text/html", "Accept-Language": "ja,en;q=0.8",
@@ -236,10 +245,17 @@ class PublicResolver(aiohttp.abc.AbstractResolver):
         pass
 
 
-async def fetch_text(url, *, data=None, headers=None, timeout=10):
+async def fetch_text(url, *, data=None, headers=None, timeout=10, session=None):
     proxy = proxy_for_url(url)
     try:
         async with asyncio.timeout(timeout):
+            if session is not None:
+                # Caller-owned pooled session (see WebTools): the caller
+                # picked the connector for this URL's proxy mode and
+                # keeps the session open for connection reuse.
+                return await _fetch_redirects(
+                    session, url, data=data, headers=headers, proxy=proxy
+                )
             if proxy is None:
                 connector = aiohttp.TCPConnector(
                     resolver=PublicResolver(), use_dns_cache=False, force_close=True
@@ -398,11 +414,9 @@ class DDGResults(HTMLParser):
             self.current[self.field] += data
 
 
-def parse_ddg(html, limit):
-    parser = DDGResults()
-    parser.feed(html)
+def _finish_results(items, limit):
     results = []
-    for item in parser.results:
+    for item in items:
         url = urljoin("https://html.duckduckgo.com/", item["url"])
         parsed = urlsplit(url)
         if parsed.hostname in {"duckduckgo.com", "html.duckduckgo.com"}:
@@ -421,6 +435,49 @@ def parse_ddg(html, limit):
         if len(results) == limit:
             break
     return results
+
+
+def parse_ddg(html, limit):
+    parser = DDGResults()
+    parser.feed(html)
+    return _finish_results(parser.results, limit)
+
+
+class DDGLiteResults(HTMLParser):
+    def __init__(self):
+        super().__init__(convert_charrefs=True)
+        self.results = []
+        self.current = None
+        self.field = None
+        self.depth = 0
+
+    def handle_starttag(self, tag, attrs):
+        attrs = dict(attrs)
+        classes = attrs.get("class", "").split()
+        if tag == "a" and "result-link" in classes:
+            self.current = {"title": "", "url": attrs.get("href", ""), "snippet": ""}
+            self.results.append(self.current)
+            self.field, self.depth = "title", 1
+        elif "result-snippet" in classes and self.current is not None:
+            self.field, self.depth = "snippet", 1
+        elif self.field and tag not in {"br", "img", "wbr", "hr", "input", "meta", "link"}:
+            self.depth += 1
+
+    def handle_endtag(self, tag):
+        if self.field:
+            self.depth -= 1
+            if self.depth <= 0:
+                self.field = None
+
+    def handle_data(self, data):
+        if self.field and self.current is not None:
+            self.current[self.field] += data
+
+
+def parse_ddg_lite(html, limit):
+    parser = DDGLiteResults()
+    parser.feed(html)
+    return _finish_results(parser.results, limit)
 
 
 def _tool(name, description, required, properties):
@@ -468,12 +525,93 @@ WEB_PARAMETERS = {tool["function"]["name"]: tool["function"]["parameters"] for t
 
 
 class WebTools:
+    """Read-only web tools on one long-lived event loop.
+
+    Every call used to pay a fresh TCP+TLS handshake through the egress
+    proxy (a new ClientSession per call, force_close). The adapter now
+    owns a daemon loop thread with pooled sessions — one per proxy mode,
+    with the same SSRF shape as the one-shot path (PublicResolver pinning
+    for direct fetches, DummyCookieJar, identity encoding, trust_env
+    off) — so repeat fetches reuse the proxy connection. All coroutines
+    run on that loop, whichever thread submitted them.
+    """
+
+    def __init__(self):
+        self._loop = None
+        self._loop_lock = threading.Lock()
+        self._sessions = {}
+        self._search_cache = {}
+
     @classmethod
     def from_env(cls):
         return (
             cls()
             if os.getenv("WEB_TOOLS_ENABLED", "true").lower() in {"1", "true", "yes", "on"}
             else None
+        )
+
+    def _ensure_loop(self):
+        with self._loop_lock:
+            if self._loop is None:
+                loop = asyncio.new_event_loop()
+                threading.Thread(
+                    target=loop.run_forever, name="web-tools", daemon=True
+                ).start()
+                self._loop = loop
+            return self._loop
+
+    def run(self, coro, *, timeout=CALL_TIMEOUT):
+        future = asyncio.run_coroutine_threadsafe(coro, self._ensure_loop())
+        try:
+            return future.result(timeout)
+        except TimeoutError:
+            future.cancel()
+            raise
+
+    async def _session_for(self, url):
+        # Runs only on the owned loop. The connector mode follows the
+        # first URL, exactly like the one-shot fetch_text path: proxied
+        # fetches must not run the pinning resolver (it would resolve
+        # the target locally), direct fetches must.
+        key = "proxy" if proxy_for_url(url) is not None else "direct"
+        session = self._sessions.get(key)
+        if session is None or session.closed:
+            if key == "proxy":
+                connector = aiohttp.TCPConnector(
+                    limit=8, keepalive_timeout=30, ttl_dns_cache=300
+                )
+            else:
+                connector = aiohttp.TCPConnector(
+                    resolver=PublicResolver(), limit=8, keepalive_timeout=30
+                )
+            session = aiohttp.ClientSession(
+                connector=connector,
+                trust_env=False,
+                auto_decompress=False,
+                cookie_jar=aiohttp.DummyCookieJar(),
+                headers={"User-Agent": USER_AGENT, "Accept-Encoding": "identity"},
+            )
+            self._sessions[key] = session
+        return session
+
+    async def fetch(self, url, **kwargs):
+        session = await self._session_for(url)
+        return await fetch_text(url, session=session, **kwargs)
+
+    def _cache_get(self, name, args):
+        entry = self._search_cache.get((name, json.dumps(args, sort_keys=True)))
+        if entry is None:
+            return None
+        stored_at, result = entry
+        if time.monotonic() - stored_at > SEARCH_CACHE_TTL:
+            return None
+        return result
+
+    def _cache_put(self, name, args, result):
+        if len(self._search_cache) > 64:
+            self._search_cache.clear()
+        self._search_cache[(name, json.dumps(args, sort_keys=True))] = (
+            time.monotonic(), result,
         )
 
     def call(self, name, args):
@@ -499,24 +637,58 @@ class WebTools:
             if not valid:
                 raise ValueError("Invalid web tool arguments")
         try:
-            result = asyncio.run(self.execute(name, args))
+            result = self.run(self.execute(name, args))
             return json.dumps(result, ensure_ascii=False)
         except (WebError, json.JSONDecodeError) as error:
             return f"Web tool error: {error}"
+        except TimeoutError:
+            return "Web tool error: timed out"
 
     async def execute(self, name, args):
         if name == "web_search":
-            _, _, html = await fetch_text(
-                "https://html.duckduckgo.com/html/", data={"q": args["query"]},
-                headers=SEARCH_HEADERS, timeout=SEARCH_TIMEOUT,
-            )
+            cached = self._cache_get(name, args)
+            if cached is not None:
+                return cached
+            try:
+                _, _, html = await self.fetch(
+                    "https://html.duckduckgo.com/html/", data={"q": args["query"]},
+                    headers=SEARCH_HEADERS, timeout=SEARCH_ATTEMPT_TIMEOUT,
+                )
+            except WebError as error:
+                if "TimeoutError" not in str(error):
+                    raise
+                # One retry inside the same overall budget: a stalled
+                # first attempt (the observed 25s tail) must not eat
+                # the whole turn.
+                _, _, html = await self.fetch(
+                    "https://html.duckduckgo.com/html/", data={"q": args["query"]},
+                    headers=SEARCH_HEADERS,
+                    timeout=SEARCH_TIMEOUT - SEARCH_ATTEMPT_TIMEOUT,
+                )
             hits = parse_ddg(html, args.get("limit", 5))
-            return {
+            if not hits:
+                # The html endpoint rate-limits this egress IP under
+                # repeated queries and answers with a fast, empty
+                # block page; the lite endpoint is a separate host
+                # and usually still answers.
+                try:
+                    _, _, lite_html = await self.fetch(
+                        "https://lite.duckduckgo.com/lite/?"
+                        + urlencode({"q": args["query"]}),
+                        headers=SEARCH_HEADERS, timeout=SEARCH_ATTEMPT_TIMEOUT,
+                    )
+                    hits = parse_ddg_lite(lite_html, args.get("limit", 5))
+                except WebError:
+                    hits = []
+            result = {
                 "results": hits,
                 "note": "" if hits else "No results, or search provider blocked the request.",
             }
+            if hits:
+                self._cache_put(name, args, result)
+            return result
         if name == "read_web_page":
-            url, media, text = await fetch_text(args["url"])
+            url, media, text = await self.fetch(args["url"])
             if media == "text/html":
                 text = readable(text)
             return {"url": url, "text": text[:MAX_TEXT], "truncated": len(text) > MAX_TEXT}
@@ -527,7 +699,11 @@ class WebTools:
             params.update(list="search", srsearch=args["query"], srlimit="8")
         else:
             params.update(prop="extracts", titles=args["title"], explaintext="1", redirects="1")
-        _, _, text = await fetch_text(base + "/w/api.php?" + urlencode(params))
+        if name == "wikipedia_search":
+            cached = self._cache_get(name, args)
+            if cached is not None:
+                return cached
+        _, _, text = await self.fetch(base + "/w/api.php?" + urlencode(params))
         data = json.loads(text)
         if not isinstance(data, dict) or not isinstance(data.get("query", {}), dict):
             raise WebError("Invalid Wikipedia response")
@@ -540,7 +716,7 @@ class WebTools:
                 for item in hits
             ):
                 raise WebError("Invalid Wikipedia search results")
-            return {
+            result = {
                 "results": [
                     {
                         "title": item["title"][:300],
@@ -550,6 +726,9 @@ class WebTools:
                     for item in hits[:8]
                 ]
             }
+            if result["results"]:
+                self._cache_put(name, args, result)
+            return result
         pages = data.get("query", {}).get("pages", [])
         if not isinstance(pages, list) or any(not isinstance(page, dict) for page in pages):
             raise WebError("Invalid Wikipedia pages")

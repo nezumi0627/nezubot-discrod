@@ -38,6 +38,7 @@ from nezubot_discrod.sandbox import run_command
 from nezubot_discrod.server_log import format_hits
 from nezubot_discrod.server_log_context import ROUTE_BUDGETS_MS, pre_retrieve
 from nezubot_discrod.server_log_tools import LOG_PARAMETERS, LOG_TOOLS, LogTools
+from nezubot_discrod.weather_tools import WEATHER_PARAMETERS, WEATHER_TOOLS, jst_now_view
 from nezubot_discrod.web_tools import WEB_PARAMETERS, WEB_TOOLS, has_web_content
 
 logger = logging.getLogger(__name__)
@@ -53,6 +54,21 @@ _WEB_LOOKUP = re.compile(
 
 def web_lookup_requested(content):
     return bool(_WEB_LOOKUP.search(unicodedata.normalize("NFKC", content)))
+
+
+# Questions the dedicated weather/clock tools answer directly. Running
+# the full server-log pre-retrieval for them (0.85s median, 2.4s p90 in
+# production) is pure added latency: the archive has nothing to say
+# about today's weather or the current time. The log tools stay
+# registered for the turn, so the model can still search if the
+# question turns out to be about the past.
+_INSTANT_LOOKUP = re.compile(
+    r"天気|気温|降水確率|湿度|今何時|現在の時刻|今の時間|今日は何日|今日の日付",
+)
+
+
+def instant_lookup_requested(content):
+    return bool(_INSTANT_LOOKUP.search(unicodedata.normalize("NFKC", content)))
 
 
 TOOLS = [
@@ -111,6 +127,7 @@ class Assistant:
         wiki_completion=None,
         server_log=None,
         web=None,
+        weather=None,
     ):
         if system_prompt not in (SYSTEM, SELF_MOD_PROMPT):
             raise ValueError("Only fixed system prompts are supported")
@@ -127,6 +144,7 @@ class Assistant:
         self.wiki_completion = wiki_completion
         self.server_log = server_log
         self.web = web if system_prompt == SYSTEM else None
+        self.weather = weather if system_prompt == SYSTEM else None
         self.history = OrderedDict()
         # Turn-scoped person carryover: the single person a turn's
         # retrieval settled on, per history scope, so a follow-up with
@@ -289,6 +307,10 @@ class Assistant:
         if ambient or self.system_prompt != SYSTEM:
             self_improve = None
         web_lookup = self.system_prompt == SYSTEM and not ambient and web_lookup_requested(content)
+        instant_lookup = (
+            self.system_prompt == SYSTEM and not ambient and instant_lookup_requested(content)
+        )
+        turn_started = monotonic()
         log = (
             LogTools(
                 self.server_log, channel_ids,
@@ -337,11 +359,21 @@ class Assistant:
                 enriched["conversation_state"] = state_view
             conversation = enriched
         payload = {"message": latest}
+        if self.system_prompt == SYSTEM and (
+            self.web is not None or self.weather is not None or log is not None
+            or wiki is not None or ambient or conversation
+            or speaker_names is not None or guild_info is not None
+        ):
+            # The model's default "now": an explicit Japan-time clock in
+            # every structured turn, instead of whatever date the
+            # provider's environment happens to carry. (Bare turns keep
+            # the plain-text shape; they carry no tools or context.)
+            payload["now"] = jst_now_view()
         retrieved_sources = []
         recent_urls = []
         private_read = bool(turns)
         retrieval_task = None
-        if log is not None and not ambient and not web_lookup:
+        if log is not None and not ambient and not web_lookup and not instant_lookup:
             automatic_channels = (
                 {str(value) for value in retrieval_channel_ids}
                 if retrieval_channel_ids is not None
@@ -398,7 +430,7 @@ class Assistant:
             }
         if self.system_prompt == SYSTEM and conversation:
             payload["conversation"] = conversation
-        if wiki is not None and not web_lookup:
+        if wiki is not None and not web_lookup and not instant_lookup:
             try:
                 context = await asyncio.to_thread(wiki.context, latest)
             except (OSError, sqlite3.Error) as error:
@@ -443,6 +475,7 @@ class Assistant:
                 wiki=wiki is not None,
                 log=log is not None,
                 web=self.web is not None,
+                weather=self.weather is not None,
                 ambient=ambient,
             )
             latest = json.dumps(payload, ensure_ascii=False)
@@ -470,6 +503,7 @@ class Assistant:
                     scope=history_key,
                     **({"server_log": log} if log is not None else {}),
                     **({"web": self.web} if self.web is not None else {}),
+                    **({"weather": self.weather} if self.weather is not None else {}),
                     **({"ambient": True} if ambient else {}),
                     **({"private_read": True} if private_read else {}),
                     **({"self_improve": self_improve} if self_improve is not None else {}),
@@ -483,6 +517,7 @@ class Assistant:
                         *(WIKI_TOOLS if wiki is not None else []),
                         *(LOG_TOOLS if log is not None else []),
                         *(WEB_TOOLS if self.web is not None else []),
+                        *(WEATHER_TOOLS if self.weather is not None else []),
                         *(SELF_IMPROVEMENT_TOOLS if self_improve is not None else []),
                     ],
                     max_tokens=2000,
@@ -510,6 +545,9 @@ class Assistant:
                     if (self_improve is not None
                             and call.function.name == "request_self_improvement"):
                         result = await request_improvement(self_improve, args)
+                    elif self.weather is not None and call.function.name in WEATHER_PARAMETERS:
+                        result = await asyncio.to_thread(
+                            self.weather.call, call.function.name, args)
                     elif self.web is not None and call.function.name in WEB_PARAMETERS:
                         if private_read and web_read:
                             result = ("Tool error: web access disabled after reading private data "
@@ -605,5 +643,8 @@ class Assistant:
         self.history.move_to_end(history_key)
         while len(self.history) > self.max_channels:
             self.history.popitem(last=False)
+        logger.info(
+            "Assistant turn finished in %.1fs", monotonic() - turn_started,
+        )
         return Reply(answer, usage=tuple(usage) if usage_known else None,
                      sources=clean_sources([*sources, *used_sources(answer, retrieved_sources)]))

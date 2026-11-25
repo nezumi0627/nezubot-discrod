@@ -61,6 +61,7 @@ from nezubot_discrod.understanding import (
 )
 from nezubot_discrod.updates import latest_version
 from nezubot_discrod.usage_limits import build_limit_embed, parse_rate_limits
+from nezubot_discrod.weather_tools import WeatherTools
 from nezubot_discrod.web_tools import WebTools
 
 logger = logging.getLogger(__name__)
@@ -373,6 +374,7 @@ class Bot(discord.Client):
                 timeout=60,
                 max_retries=1,
             )
+        web_tools = WebTools.from_env()
         self.assistant = Assistant(
             self.ai_client,
             settings.model,
@@ -380,7 +382,8 @@ class Bot(discord.Client):
             wiki=MemberWiki(checkout=settings.self_checkout or None),
             wiki_completion=self.ai_client.create if settings.provider == "codex" else None,
             server_log=self.server_log,
-            web=WebTools.from_env(),
+            web=web_tools,
+            weather=WeatherTools(web_tools) if web_tools is not None else None,
             run_command_enabled=run_command_enabled(),
         )
         self.tree = app_commands.CommandTree(self)

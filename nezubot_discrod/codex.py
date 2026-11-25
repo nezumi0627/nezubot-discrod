@@ -27,6 +27,7 @@ from nezubot_discrod.prompts import (
 )
 from nezubot_discrod.sandbox import run_command, truncate_output
 from nezubot_discrod.server_log_tools import LOG_PARAMETERS, LOG_TOOLS
+from nezubot_discrod.weather_tools import WEATHER_PARAMETERS, WEATHER_TOOLS
 from nezubot_discrod.web_tools import WEB_PARAMETERS, WEB_TOOLS, has_web_content
 
 CODEX_VERSION = "codex-cli 0.171.0"
@@ -156,6 +157,7 @@ class _ThreadEntry:
 
 
 def _thread_config(model, messages, *, wiki=None, server_log=None, web=None,
+                   weather=None,
                    ambient=False, arbiter=False, server_wiki=False, self_improve=None,
                    run_command_enabled=True):
     """Everything that defines a Codex thread, plus its config hash.
@@ -168,6 +170,7 @@ def _thread_config(model, messages, *, wiki=None, server_log=None, web=None,
     tool_free = arbiter or server_wiki
     if (arbiter and server_wiki) or (
         tool_free and (wiki is not None or server_log is not None or web is not None
+                       or weather is not None
                        or ambient or self_improve is not None)
     ):
         raise CodexSecurityError("Tool-free Codex turn cannot receive conversation tools")
@@ -179,7 +182,7 @@ def _thread_config(model, messages, *, wiki=None, server_log=None, web=None,
     else:
         default_prompt = conversation_prompt(
             wiki=wiki is not None, log=server_log is not None,
-            web=web is not None, ambient=ambient,
+            web=web is not None, weather=weather is not None, ambient=ambient,
         )
     prompt = (
         messages[0]["content"]
@@ -190,6 +193,7 @@ def _thread_config(model, messages, *, wiki=None, server_log=None, web=None,
         wiki is None
         and server_log is None
         and web is None
+        and weather is None
         and not ambient
         and not tool_free
         and prompt == SELF_MOD_PROMPT
@@ -200,6 +204,7 @@ def _thread_config(model, messages, *, wiki=None, server_log=None, web=None,
         *(WIKI_TOOLS if wiki is not None else []),
         *(LOG_TOOLS if server_log is not None else []),
         *(WEB_TOOLS if web is not None else []),
+        *(WEATHER_TOOLS if weather is not None else []),
         *(SELF_IMPROVEMENT_TOOLS if effective_self_improve is not None else []),
     ]
     if tool_free:
@@ -296,6 +301,7 @@ class AppServer:
         self.wiki = None
         self.server_log = None
         self.web = None
+        self.weather = None
         self.self_improve = None
         self.tool_free = False
         self.private_read = False
@@ -388,8 +394,10 @@ class AppServer:
         text = (
             "Tool error: only run_command with a nonempty command string is allowed."
             if self.wiki is None and self.server_log is None and self.web is None
+            and self.weather is None
             else "Tool error: unknown tool or invalid arguments."
         )
+        tool_started = time.monotonic()
         if (
             scoped
             and self.run_command_enabled
@@ -419,6 +427,15 @@ class AppServer:
                     valid = True
             except (ValueError, TypeError) as error:
                 text = f"Tool error: {error}"
+        elif scoped and self.weather is not None and name in WEATHER_PARAMETERS:
+            # Weather/clock tools hit fixed public APIs with structured
+            # arguments and results; they are not web content and do not
+            # take part in the web taint accounting above.
+            try:
+                text = await asyncio.to_thread(self.weather.call, name, args)
+                valid = True
+            except (ValueError, TypeError) as error:
+                text = f"Tool error: {error}"
         elif scoped and self.server_log is not None and name in LOG_PARAMETERS:
             self.private_read = True
             try:
@@ -433,6 +450,11 @@ class AppServer:
                 valid = True
             except WikiError as error:
                 text = f"Tool error: {error}"
+        tool_elapsed = time.monotonic() - tool_started
+        if tool_elapsed >= 3:
+            logger.info(
+                "Slow tool call: %s took %.1fs", name, tool_elapsed,
+            )
         if valid:
             self.sources = collect_tool_sources(self.sources, name, text)
         await self.send(
@@ -469,7 +491,8 @@ class AppServer:
             await self.initialize(refresh_token=refresh_token)
 
     async def complete(
-        self, model, messages, cwd, *, wiki=None, server_log=None, web=None, ambient=False,
+        self, model, messages, cwd, *, wiki=None, server_log=None, web=None,
+        weather=None, ambient=False,
         arbiter=False,
         server_wiki=False,
         private_read=False,
@@ -484,10 +507,12 @@ class AppServer:
         # reuse is orchestrated by CodexClient, not by this class.
         config = _thread_config(
             model, messages, wiki=wiki, server_log=server_log, web=web,
+            weather=weather,
             ambient=ambient, arbiter=arbiter, server_wiki=server_wiki,
             self_improve=self_improve,
             run_command_enabled=self.run_command_enabled,
         )
+        turn_started = time.monotonic()
         self.tool_free = config.tool_free
         self.self_improve = config.self_improve
         self.private_read = private_read
@@ -505,6 +530,7 @@ class AppServer:
         self.wiki = wiki
         self.server_log = server_log
         self.web = web
+        self.weather = weather
         try:
             await self.ensure_initialized()
             if thread_id is None:
@@ -591,6 +617,15 @@ class AppServer:
                         raise CodexRateLimited("Codex rate limited")
                     if turn.get("status") != "completed":
                         raise RuntimeError("Codex turn failed or was interrupted")
+                    usage = self.usage or {}
+                    logger.info(
+                        "Codex turn finished in %.1fs (tool_calls=%d, "
+                        "input=%s, cached=%s, output=%s)",
+                        time.monotonic() - turn_started, self.tool_calls,
+                        usage.get("prompt_tokens"),
+                        usage.get("cached_input_tokens"),
+                        usage.get("completion_tokens"),
+                    )
                     return answer
         finally:
             # Never leave the previous turn's tool bindings live on a
@@ -598,6 +633,7 @@ class AppServer:
             self.wiki = None
             self.server_log = None
             self.web = None
+            self.weather = None
             self.self_improve = None
 
 
@@ -863,10 +899,12 @@ class CodexClient:
 
     async def _create_persistent(
         self, *, model, messages, scope, wiki=None, server_log=None, web=None,
+        weather=None,
         ambient=False, private_read=False, self_improve=None,
     ):
         config = _thread_config(
             model, messages, wiki=wiki, server_log=server_log, web=web,
+            weather=weather,
             ambient=ambient, self_improve=self_improve,
             run_command_enabled=self.run_command_enabled,
         )
@@ -893,6 +931,7 @@ class CodexClient:
             wiki=wiki,
             **({"server_log": server_log} if server_log is not None else {}),
             **({"web": web} if web is not None else {}),
+            **({"weather": weather} if weather is not None else {}),
             **({"ambient": True} if ambient else {}),
             **({"private_read": True} if private_read else {}),
             **({"self_improve": self_improve} if self_improve is not None else {}),
@@ -959,7 +998,8 @@ class CodexClient:
         )
 
     async def create(
-        self, *, model, messages, wiki=None, server_log=None, web=None, ambient=False,
+        self, *, model, messages, wiki=None, server_log=None, web=None, weather=None,
+        ambient=False,
         arbiter=False, server_wiki=False, private_read=False, self_improve=None, scope=None,
         **kwargs
     ):
@@ -973,6 +1013,7 @@ class CodexClient:
                         wiki=wiki,
                         server_log=server_log,
                         web=web,
+                        weather=weather,
                         ambient=ambient,
                         private_read=private_read,
                         self_improve=self_improve,
@@ -1004,6 +1045,7 @@ class CodexClient:
                 wiki=wiki,
                 server_log=server_log,
                 web=web,
+                weather=weather,
                 ambient=ambient,
                 arbiter=arbiter,
                 server_wiki=server_wiki,
@@ -1012,7 +1054,8 @@ class CodexClient:
             )
 
     async def _create_legacy(
-        self, *, model, messages, wiki=None, server_log=None, web=None, ambient=False,
+        self, *, model, messages, wiki=None, server_log=None, web=None, weather=None,
+        ambient=False,
         arbiter=False, server_wiki=False, private_read=False, self_improve=None,
     ):
         # Never load the user's config, MCP servers, plugins, hooks or skills.
@@ -1028,6 +1071,7 @@ class CodexClient:
                     wiki=wiki,
                     **({"server_log": server_log} if server_log is not None else {}),
                     **({"web": web} if web is not None else {}),
+                    **({"weather": weather} if weather is not None else {}),
                     **({"ambient": True} if ambient else {}),
                     **({"arbiter": True} if arbiter else {}),
                     **({"server_wiki": True} if server_wiki else {}),
