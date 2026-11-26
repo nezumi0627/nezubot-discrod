@@ -69,6 +69,17 @@ WEIGHTS = {
     "person_graph": 10,
 }
 
+# Saturation points for the two count-based scores, in the units the
+# counts actually measure since the 2026-11-27 rebuild (v1.34.0):
+# inter-person reply/mention links for the graph, and Server Wiki person
+# entries with real content for the wiki. Measured on the production
+# archive that day: ~100 members reach 300 inter-person links, and
+# 38 of the 899 people with any Server Wiki content reach 50 content
+# entries — full marks are earned by the genuinely well-connected /
+# well-documented core, not by raw archive volume.
+GRAPH_LINK_SATURATION = 300
+SERVER_WIKI_ENTRY_SATURATION = 50
+
 
 def ensure_me_schema(db):
     db.execute(ME_DDL)
@@ -115,9 +126,31 @@ def collect_understanding(store, user_id, *, server_wiki_path=None):
             "SELECT username, display_name, nickname FROM users WHERE user_id = ?",
             (user_id,),
         ).fetchone()
+        # Person-graph links count only inter-person reply/mention
+        # relations: rows where this person was replied to or
+        # mentioned by someone else, plus rows on their own messages
+        # that reply to or mention someone else. The raw
+        # message_people count this replaced was dominated by the
+        # person's own author rows (82% for the most active member),
+        # so the "relations" number mostly measured how much the
+        # person talks, not how connected they are; self-relations
+        # (replying to or mentioning yourself) are excluded for the
+        # same reason. The author rows stay in the table — other
+        # consumers (the appellation miner, authorship lookups) need
+        # them — so the exclusion lives here in the aggregation.
         graph_links = db.execute(
-            "SELECT count(*) FROM message_people WHERE user_id = ?",
-            (user_id,),
+            "SELECT "
+            "(SELECT count(*) FROM message_people mp "
+            " JOIN messages m ON m.id = mp.message_id "
+            " WHERE mp.user_id = ? AND mp.relation IN ('reply', 'mention') "
+            "   AND m.author_id != mp.user_id AND m.deleted = 0) "
+            "+ "
+            "(SELECT count(*) FROM messages m "
+            " JOIN message_people mp ON mp.message_id = m.id "
+            " WHERE m.author_id = ? AND m.deleted = 0 "
+            "   AND mp.relation IN ('reply', 'mention') "
+            "   AND mp.user_id != m.author_id)",
+            (user_id, user_id),
         ).fetchone()[0]
         tier_row = None
         try:
@@ -158,24 +191,31 @@ def collect_understanding(store, user_id, *, server_wiki_path=None):
         0.5 * (profile_fields / 3.0) + 0.5 * min(1.0, alias_count / 6.0)
     )
 
+    # Only Server Wiki person entries with actual content count as
+    # articles. Most person rows are alias-index rows (a name variant
+    # with an empty summary): 81% archive-wide, and only 899 of 2,986
+    # people have any content row at all. Counting raw rows reported
+    # e.g. 408 "articles" for a person with 139 real ones, and the
+    # old score (a free 0.4 for having any row, saturating at 15
+    # rows) handed full marks to almost anyone with a few name
+    # variants. The score is now purely proportional to content
+    # entries, saturating at SERVER_WIKI_ENTRY_SATURATION.
     server_wiki_entries = None
     if server_wiki_path is not None:
         try:
             with sqlite3.connect(f"file:{server_wiki_path}?mode=ro", uri=True) as wiki:
                 server_wiki_entries = wiki.execute(
                     "SELECT count(*) FROM server_wiki_entry "
-                    "WHERE kind = 'person' AND key = ?",
+                    "WHERE kind = 'person' AND key = ? AND summary != ''",
                     (user_id,),
                 ).fetchone()[0]
         except sqlite3.Error:
             server_wiki_entries = None
     if server_wiki_entries is None:
         server_wiki_score = 0.0
-    elif server_wiki_entries == 0:
-        server_wiki_score = 0.0
     else:
-        server_wiki_score = _clamp(0.4 + server_wiki_entries / 25.0)
-    graph_score = _clamp(graph_links / 300.0)
+        server_wiki_score = _clamp(server_wiki_entries / float(SERVER_WIKI_ENTRY_SATURATION))
+    graph_score = _clamp(graph_links / float(GRAPH_LINK_SATURATION))
 
     parts = {
         "appellations": {

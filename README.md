@@ -1,8 +1,8 @@
 # nezubot-discrod
 
 ![Python](https://img.shields.io/badge/python-3.12%2B-blue)
-![Version](https://img.shields.io/badge/version-1.30.0-informational)
-![Tests](https://img.shields.io/badge/tests-1571%20passed-brightgreen)
+![Version](https://img.shields.io/badge/version-1.36.0-informational)
+![Tests](https://img.shields.io/badge/tests-1635%20passed-brightgreen)
 
 **メンションに答える Discord AI Bot。** サーバー全体の発言ログを検索（RAG）して
 過去の会話や人物について答え、メンバーごとの記憶（Wiki）を持ちます。
@@ -109,7 +109,13 @@
   いないか検査してから送る（コピー検出型のガード）
 - **実ブラウザ検索フォールバック** — Web 検索の HTTP 経路が
   空振り・ブロックされたときだけ、実 Chromium を起動して検索
-  結果ページの描画 DOM から結果を読む（ふだんは起動しない）
+  結果ページの描画 DOM から結果を読む（ふだんは起動しない）。
+  モデルが任意の公開 URL を実ブラウザで開く読み取り専用ツールも
+  同じ基盤の上にあり、内部アドレスへのアクセスは遮断される
+- **GitHub の帰属確認** — GitHub の話題では、そのターンに特定した
+  人物について API メタデータ（所有者・fork かどうか・fork 元）を
+  取得して確定情報として渡す。fork の保持者を製作者と取り違え
+  たり、URL を貼っただけの人を製作者と決めつけたりしない
 - **現在時刻と天気のツール** — 時刻は日本時間を既定として扱い、
   天気は Open-Meteo（キー不要）から取得する
 - **回答モデルの切り替え** — `/model` でユーザーごとに回答モデルを
@@ -298,7 +304,8 @@ deploy.env.example 設定の雛形（全項目・プレースホルダ）
 | `understanding.py` | `/me` の理解度計測と、優先対象への裏処理 |
 | `server_wiki.py` / `member_wiki.py` | サーバー Wiki（人物・出来事）とメンバー Wiki |
 | `server_wiki_curator.py` | サーバー Wiki の巡回整備（出典照合・修正・削除） |
-| `web_browser.py` / `web_guard.py` | 実ブラウザ検索フォールバックと、外部送信前のコピー検出ガード |
+| `web_browser.py` / `web_guard.py` | 実ブラウザ検索フォールバック／ページ閲覧と、外部送信前のコピー検出ガード |
+| `github_meta.py` | GitHub API メタデータ（所有者・fork 元）の取得とキャッシュ |
 | `devin_answer.py` / `model_overrides.py` | Devin 回答バックエンドと、ユーザーごとのモデル上書き |
 | `blacklist.py` / `moderation.py` / `ranking.py` | ブラックリスト、ポイント制モデレーション、`/rank` 集計 |
 | `local_embedder.py` | ローカル埋め込みモデルの実行 |

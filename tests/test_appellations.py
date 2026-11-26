@@ -285,3 +285,126 @@ def test_person_summary_wording(people_store):
     assert "Discord名は「のの」" in summary
     assert "ユーザー名 tanuki_dev" in summary
     assert "大半からは「タヌキ」" in summary
+
+
+# --- Standalone mining (messages with no determined addressee) ---
+#
+# The owner's /me 呼ばれ方 stayed at zero while every other score
+# filled in: people address him by bare vocative in open channel flow
+# (「テストユーザーさん、…」 with no reply or mention attached), and the
+# addressed miner structurally never sees those messages. The
+# standalone pass mines them, anchored on known profile names only.
+
+
+def _msg(number, author_id, text, minute=0):
+    value = record(number)
+    value["id"] = str(number)
+    value["author"] = {"id": author_id, "username": f"user{author_id}",
+                       "bot": False}
+    value["content"] = text
+    value["timestamp"] = f"2026-01-01T00:{minute:02d}:00+00:00"
+    return value
+
+
+def _standalone_store(tmp_path):
+    """A store where テストユーザー (user 40) is a known profile name and
+    callers use it in messages that address nobody mechanically."""
+    store = ServerLog(tmp_path / "logs" / "server_log.db", guild_id="100")
+    rows = [
+        _msg(1, "999", "テストユーザーさん、その件どうなった？", 1),
+        _msg(2, "888", "テストユーザーくん見てる？", 2),
+        _msg(3, "777", "テストユーザーちゃん、おはよう", 3),
+        _msg(4, "999", "テストユーザーさんありがとう", 4),
+        _msg(5, "888", "テストユーザーくん、それな", 5),
+        _msg(6, "777", "今日は暑いね", 6),       # no name at all
+        _msg(7, "999", "たろうさん来た", 7),     # unknown name
+        _msg(8, "40", "テストユーザーさんって俺のこと？", 8),  # self-address
+    ]
+    store.upsert_many(rows)
+    with store.connect() as db:
+        db.executemany(
+            "INSERT INTO author_aliases VALUES (?, ?, ?, ?, ?)",
+            [("100", "10", "40", "テストユーザー", "テストユーザー"),
+             ("100", "10", "40", "testuser0627", "testuser0627")])
+    return store
+
+
+def test_standalone_mining_attributes_known_names(tmp_path):
+    store = _standalone_store(tmp_path)
+    stats = mine_appellations(store)
+    assert stats["standalone_messages"] == 8
+    assert stats["standalone_pairs"] == 5
+    with store.connect() as db:
+        rows = db.execute(
+            "SELECT caller_id, appellation, count FROM appellations "
+            "WHERE target_id = '40' ORDER BY caller_id").fetchall()
+    assert [(r[0], r[1], r[2]) for r in rows] == [
+        ("777", "テストユーザー", 1), ("888", "テストユーザー", 2), ("999", "テストユーザー", 2)]
+    # Qualified: 5 uses across 3 callers — the /me score can fill in.
+    qualified = qualified_appellations(
+        [("40", r[0], r[1], r[2]) for r in rows])
+    assert qualified == {"テストユーザー": (5, 3)}
+    # Second run is incremental: nothing new is mined.
+    again = mine_appellations(store)
+    assert again["standalone_messages"] == 0
+    assert again["standalone_pairs"] == 0
+
+
+def test_standalone_mining_skips_addressed_messages(tmp_path):
+    # A message WITH a reply target belongs to the addressed pass;
+    # the standalone pass must not double-count it.
+    store = _standalone_store(tmp_path)
+    with store.connect() as db:
+        db.execute(
+            "INSERT INTO message_people VALUES ('1', '40', 'reply', 1.0)")
+    stats = mine_appellations(store)
+    assert stats["standalone_messages"] == 7
+    with store.connect() as db:
+        total = db.execute(
+            "SELECT sum(count) FROM appellations WHERE target_id = '40'"
+        ).fetchone()[0]
+    # 4 standalone + 1 addressed = 5, not 6.
+    assert total == 5
+
+
+def test_standalone_shared_name_goes_to_dominant_owner(tmp_path):
+    # A name carried by a main account and its near-silent alt is the
+    # main account's name (the owner's real shape: テストユーザー is also the
+    # display name of his 316-message alt).
+    store = ServerLog(tmp_path / "logs" / "server_log.db", guild_id="100")
+    rows = [_msg(i, "50", f"発言{i}", i % 60) for i in range(1, 61)]
+    rows += [_msg(100, "51", "サブの発言", 40)]
+    rows += [
+        _msg(200, "999", "テストユーザーさん、確認して", 41),
+        _msg(201, "888", "テストユーザーくん頼む", 42),
+    ]
+    store.upsert_many(rows)
+    with store.connect() as db:
+        db.executemany(
+            "INSERT INTO author_aliases VALUES (?, ?, ?, ?, ?)",
+            [("100", "10", "50", "テストユーザー", "テストユーザー"),
+             ("100", "10", "51", "テストユーザー", "テストユーザー")])
+    mine_appellations(store)
+    with store.connect() as db:
+        targets = {r[0] for r in db.execute(
+            "SELECT DISTINCT target_id FROM appellations")}
+    assert targets == {"50"}
+
+
+def test_standalone_shared_name_between_peers_not_attributed(tmp_path):
+    # Two active people genuinely sharing a name: nobody is credited
+    # (the たぬ shape — attribution would manufacture a false fact).
+    store = ServerLog(tmp_path / "logs" / "server_log.db", guild_id="100")
+    rows = [_msg(i, "50", f"発言{i}", i % 60) for i in range(1, 61)]
+    rows += [_msg(100 + i, "51", f"発言{i}", i % 60) for i in range(1, 61)]
+    rows += [_msg(300, "999", "たぬさん来た", 50)]
+    store.upsert_many(rows)
+    with store.connect() as db:
+        db.executemany(
+            "INSERT INTO author_aliases VALUES (?, ?, ?, ?, ?)",
+            [("100", "10", "50", "たぬ", "たぬ"),
+             ("100", "10", "51", "たぬ", "たぬ")])
+    mine_appellations(store)
+    with store.connect() as db:
+        count = db.execute("SELECT count(*) FROM appellations").fetchone()[0]
+    assert count == 0

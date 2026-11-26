@@ -1,4 +1,5 @@
 import asyncio
+import sqlite3
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
@@ -89,6 +90,42 @@ def test_collect_understanding_counts_only_established_appellations(me_store):
     assert "呼び手 2 人" in part["detail"]
     assert "「タヌキ」" in part["detail"]
     assert part["score"] < 1.0
+
+
+def test_collect_understanding_graph_counts_only_interpersonal_links(me_store):
+    with me_store.connect() as db:
+        # A self-reply and a self-mention on the member's own messages
+        # are not relations with anyone and must not count.
+        db.execute("INSERT INTO message_people VALUES ('100', '30', 'reply', 1.0)")
+        db.execute("INSERT INTO message_people VALUES ('101', '30', 'mention', 1.0)")
+        # An outgoing mention on the member's own message does count.
+        db.execute("INSERT INTO message_people VALUES ('102', '999', 'mention', 1.0)")
+    report = collect_understanding(me_store, "30")
+    part = report["parts"]["person_graph"]
+    # The fixture's 8 received replies plus the 1 outgoing mention.
+    # The member's own author rows and the two self-relations are
+    # excluded even though they sit in message_people.
+    assert "関係 9 件" in part["detail"]
+
+
+def test_collect_understanding_server_wiki_counts_only_content_entries(me_store, tmp_path):
+    server_wiki_path = tmp_path / "server_wiki.db"
+    with sqlite3.connect(server_wiki_path) as wiki:
+        wiki.execute(
+            "CREATE TABLE server_wiki_entry (guild TEXT, channel TEXT, start INTEGER, "
+            "kind TEXT, key TEXT, title TEXT, summary TEXT, sources TEXT)"
+        )
+        wiki.executemany(
+            "INSERT INTO server_wiki_entry VALUES ('100', '10', 0, 'person', '30', ?, ?, '')",
+            [("のの", "")] * 20 + [("", "活動の要約")] * 25,
+        )
+    report = collect_understanding(me_store, "30", server_wiki_path=server_wiki_path)
+    part = report["parts"]["server_wiki"]
+    # 20 alias-index rows (empty summary) are not articles; the 25
+    # content entries are, and the score is 25 / saturation 50 with
+    # no free base for merely existing in the index.
+    assert "人物記事 25 件" in part["detail"]
+    assert part["score"] == pytest.approx(0.5)
 
 
 def test_collect_understanding_unknown_person_is_zero(tmp_path):

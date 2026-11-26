@@ -191,7 +191,7 @@ class OutboundGuard:
             checks.append(("query", args.get("query"), "query"))
         elif name == "wikipedia_read":
             checks.append(("query", args.get("title"), "article title"))
-        elif name == "read_web_page":
+        elif name in {"read_web_page", "browse_page"}:
             checks.append(("url", args.get("url"), "URL"))
         for kind, payload, label in checks:
             if self.check(payload, kind=kind):

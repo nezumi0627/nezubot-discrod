@@ -5,7 +5,9 @@ import re
 import sqlite3
 import unicodedata
 from collections import OrderedDict
+from datetime import UTC, datetime
 from time import monotonic
+from zoneinfo import ZoneInfo
 
 from nezubot_discrod.ambient import ambient_excluded, skip_answer
 from nezubot_discrod.claim_check import (
@@ -68,6 +70,52 @@ _WEB_LOOKUP = re.compile(
 
 def web_lookup_requested(content):
     return bool(_WEB_LOOKUP.search(unicodedata.normalize("NFKC", content)))
+
+
+_FIRST_ACTIVITY_FACT = re.compile(
+    r"最初の発言: (\d{4})年(\d{1,2})月(\d{1,2})日 (\d{1,2}):(\d{2})（JST）")
+_FULL_DATE = re.compile(r"(\d{4})年(\d{1,2})月(\d{1,2})日")
+
+
+def first_activity_fact(rendered_context):
+    """The instant a delivered 最初の発言（確定情報） block establishes,
+    as (JST date, UTC date) — parsed from the rendered context, the
+    same string the model was handed. None when no block was
+    delivered. The UTC date rides along because a draft quoting the
+    same instant in UTC is not a contradiction."""
+    match = _FIRST_ACTIVITY_FACT.search(rendered_context or "")
+    if not match:
+        return None
+    year, month, day, hour, minute = (int(group) for group in match.groups())
+    jst = datetime(year, month, day, hour, minute,
+                   tzinfo=ZoneInfo("Asia/Tokyo"))
+    return (jst.date(), jst.astimezone(UTC).date())
+
+
+def draft_contradicts_first_activity(draft, fact):
+    """Whether the draft states a full calendar date that matches
+    neither rendering of the block's instant, while never stating
+    the block's own date — the 2026-11-27 01:24 shape: the correct
+    block was delivered, yet the draft repeated the transcript's
+    wrong date and dressed it as re-verified from the records. A
+    draft that mentions the block's date at all is left alone (it
+    engaged with the block; anything else is generation quality,
+    not this failure), and a draft with no full date asserts no
+    date at all."""
+    if fact is None or not draft:
+        return False
+    jst_date, utc_date = fact
+    stated = {
+        (int(year), int(month), int(day))
+        for year, month, day in _FULL_DATE.findall(draft)
+    }
+    if not stated:
+        return False
+    jst_tuple = (jst_date.year, jst_date.month, jst_date.day)
+    utc_tuple = (utc_date.year, utc_date.month, utc_date.day)
+    if jst_tuple in stated:
+        return False
+    return any(value not in (jst_tuple, utc_tuple) for value in stated)
 
 
 # Questions the dedicated weather/clock tools answer directly. Running
@@ -400,7 +448,7 @@ class Assistant:
 
     async def _revise_claim_draft(
         self, *, model, messages, draft, wiki, log, history_key,
-        private_read, self_improve, evidence="",
+        private_read, self_improve, evidence="", nudge=None,
     ):
         """One evidence-based re-answer for a conceded dispute draft.
 
@@ -414,34 +462,40 @@ class Assistant:
         quoted in the nudge so the model must engage with what it
         was about to say. Any failure keeps the original draft; a
         revision that itself concedes is delivered as-is (no loop).
-        """
-        nudge = (
-            "【下書きの見直し】あなたの下書き（このターンの回答案）は、"
-            "記録に関する未検証の主張への同意や謝罪を含んでいます。"
-            f"下書き: 「{draft[:600]}」 "
-            "payload の claim_dispute と、retrieved_server_context の"
-            "「主張の検証」ブロックを見直し、特に話者本人の過去発言が"
-            "主張と食い違うかどうかを確かめて、答え直してください。"
-            "食い違う本人の発言がある場合は、その発言（日時と短い引用）"
-            "を根拠に、主張をそのまま認めずに答えてください。"
-            "資料が主張を裏付ける場合だけ、その根拠を述べて訂正を"
-            "受け入れてください。決着しない場合は「記録では確認"
-            "できない」と述べ、謝罪や全面同意で済ませないでください。"
-            "下書きをそのまま繰り返さないでください。"
-        )
-        if evidence:
-            # Hand the revision the verified hits themselves, not
-            # just a pointer to the block: the first-pass failure was
-            # the model reading these messages and discounting them,
-            # so the nudge states the one hard fact they establish —
-            # the disputed words exist in the speaker's own messages.
-            nudge += (
-                "\n検証で見つかった話者本人の発言（アーカイブ実在）:\n"
-                + evidence
-                + "\n本人が実際にその語で発言している以上、「私の発言"
-                "ではない」という主張は、その部分については記録上"
-                "成り立ちません。その事実を根拠として述べてください。"
+
+        The first-activity gate reuses this transport with its own
+        nudge: the mechanism (one tool-free re-answer over the same
+        context, draft quoted) is identical, only the instruction
+        differs."""
+        if nudge is None:
+            nudge = (
+                "【下書きの見直し】あなたの下書き（このターンの回答案）は、"
+                "記録に関する未検証の主張への同意や謝罪を含んでいます。"
+                f"下書き: 「{draft[:600]}」 "
+                "payload の claim_dispute と、retrieved_server_context の"
+                "「主張の検証」ブロックを見直し、特に話者本人の過去発言が"
+                "主張と食い違うかどうかを確かめて、答え直してください。"
+                "食い違う本人の発言がある場合は、その発言（日時と短い引用）"
+                "を根拠に、主張をそのまま認めずに答えてください。"
+                "資料が主張を裏付ける場合だけ、その根拠を述べて訂正を"
+                "受け入れてください。決着しない場合は「記録では確認"
+                "できない」と述べ、謝罪や全面同意で済ませないでください。"
+                "下書きをそのまま繰り返さないでください。"
             )
+            if evidence:
+                # Hand the revision the verified hits themselves, not
+                # just a pointer to the block: the first-pass failure
+                # was the model reading these messages and discounting
+                # them, so the nudge states the one hard fact they
+                # establish — the disputed words exist in the speaker's
+                # own messages.
+                nudge += (
+                    "\n検証で見つかった話者本人の発言（アーカイブ実在）:\n"
+                    + evidence
+                    + "\n本人が実際にその語で発言している以上、「私の発言"
+                    "ではない」という主張は、その部分については記録上"
+                    "成り立ちません。その事実を根拠として述べてください。"
+                )
         revision_messages = [*messages, {"role": "user", "content": nudge}]
         try:
             if is_devin_model(model) and self.devin_responder is not None:
@@ -616,6 +670,7 @@ class Assistant:
         claim_gate_active = False
         claim_evidence = ""
         claim_author_hits = []
+        delivered_first_activity = None
         if log is not None and not ambient and not web_lookup and not instant_lookup \
                 and not server_fact:
             automatic_channels = (
@@ -809,6 +864,14 @@ class Assistant:
                         diagnostics.get("claim_check_delivered"))
                     claim_author_hits = (
                         diagnostics.get("claim_author_hits") or [])
+                    if diagnostics.get("first_activity_delivered"):
+                        # Arm the first-activity draft gate: the
+                        # deterministic block was delivered, so its
+                        # date is a hard fact for this turn and the
+                        # finished draft can be checked against it
+                        # mechanically (see the gate below).
+                        delivered_first_activity = first_activity_fact(
+                            str(retrieved))
                     if claim_gate_active:
                         # The verification block as rendered into the
                         # payload (the result object carries no chunk
@@ -1054,6 +1117,45 @@ class Assistant:
                 wiki=wiki, log=log, history_key=history_key,
                 private_read=private_read, self_improve=self_improve,
                 evidence=claim_evidence,
+            )
+            if revised:
+                answer = revised
+        if (
+            delivered_first_activity is not None and not ambient
+            and self.system_prompt == SYSTEM
+            and draft_contradicts_first_activity(
+                answer, delivered_first_activity)
+        ):
+            # First-activity gate, draft inspection: the deterministic
+            # block was delivered and the draft still states a
+            # different date — the 2026-11-27 01:24 shape, where the
+            # prompt-level "the block wins" rule demonstrably did not
+            # hold on the Codex path and the transcript's wrong date
+            # was restated as re-verified. One re-answer over the same
+            # context, with the block's value stated in the nudge;
+            # the result then stands, exactly like the claim gate.
+            jst_date = delivered_first_activity[0]
+            logger.info(
+                "First-activity gate: revising a contradicting draft "
+                "(turn_id=%s)", turn_id,
+            )
+            revised = await self._revise_claim_draft(
+                model=model, messages=messages, draft=answer,
+                wiki=wiki, log=log, history_key=history_key,
+                private_read=private_read, self_improve=self_improve,
+                nudge=(
+                    "【下書きの見直し】あなたの下書き（このターンの回答案）は、"
+                    "このターンに配信された「最初の発言（確定情報）」ブロックと"
+                    "食い違う日付を述べています。"
+                    f"下書き: 「{answer[:600]}」 "
+                    f"ブロックの確定値は {jst_date.year}年{jst_date.month}月"
+                    f"{jst_date.day}日（JST）です。transcript 内の過去の回答に"
+                    "ある日付は根拠ではありません（その日付自体が過去の誤り"
+                    "です）。ブロックの値で答え直し、過去の誤った日付は訂正"
+                    "してください。値には留保（アーカイブで確認できる最古の"
+                    "発言であり、Discord のサーバー参加日時そのものではない）"
+                    "を付けてください。下書きの日付を繰り返さないでください。"
+                ),
             )
             if revised:
                 answer = revised

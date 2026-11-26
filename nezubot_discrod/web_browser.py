@@ -5,6 +5,13 @@ usually answers. It escalates here only when the HTTP endpoints return
 no results (blocked, rate-limited or empty), because driving a real
 browser costs seconds and hundreds of MB per launch.
 
+The same tier also serves the browse_page tool (BrowserSearch.browse):
+rendering one arbitrary public page the model asked for. That path is
+read-only by construction (navigation only, downloads disabled, a
+fresh context per visit) and every request the page makes passes the
+SSRF guard in _guard_browse_route, because a browsed page — unlike a
+search engine's results page — is fully attacker-controlled.
+
 The approach follows the Sakana agent's browser search (drive a real
 Chrome, scrape the rendered result pages of DuckDuckGo Lite, then the
 HTML endpoint, then Bing; unwrap redirect URLs; warn the model that
@@ -75,6 +82,9 @@ BROWSER_IDLE_TIMEOUT = 300
 # One budget for the whole tier, so a bad network day cannot eat the
 # web_search call budget (CALL_TIMEOUT in web_tools).
 BROWSER_SEARCH_TIMEOUT = 55
+# browse_page gets its own, slightly smaller budget: it renders one
+# page the model explicitly asked for, inside the same tool-call cap.
+BROWSE_TIMEOUT = 45
 NAVIGATION_TIMEOUT_MS = 15000
 # Let the result DOM settle briefly after domcontentloaded.
 SETTLE_MS = 400
@@ -477,6 +487,86 @@ class BrowserSearch:
         finally:
             self._schedule_idle_close()
 
+    async def browse(self, url):
+        """Render one arbitrary public page for the browse_page tool.
+
+        Returns {"url", "title", "html"} for the final (post-redirect,
+        post-JavaScript) page, or None when it cannot be rendered. A
+        forbidden URL raises WebError, so the model hears the refusal
+        instead of a generic failure. Navigation is the only action:
+        the tool never logs in, never fills or submits a form and
+        never downloads, and each visit runs in a fresh context whose
+        cookies die with the call. Serialized with searches through
+        the tier's lock, under its own timeout.
+        """
+        url = vet_url(url)
+        if proxy_for_url(url) is not None:
+            vet_proxy_url(url)
+        try:
+            async with asyncio.timeout(BROWSE_TIMEOUT):
+                async with self._lock:
+                    return await self._browse(url)
+        except Exception as error:  # like search, the tier fails soft
+            logger.warning("browser browse failed: %s", type(error).__name__)
+            return None
+        finally:
+            self._schedule_idle_close()
+
+    async def _browse(self, url):
+        self._generation += 1
+        try:
+            browser = await self._ensure_browser()
+            if browser is None:
+                return None
+            context = await browser.new_context(
+                locale="ja-JP",
+                user_agent=self._user_agent(),
+                accept_downloads=False,
+            )
+            try:
+                await context.route("**/*", _guard_browse_route)
+                try:
+                    await context.route_web_socket("**/*", _guard_browse_socket)
+                except Exception:
+                    # Older drivers lack WebSocket routing; the HTTP
+                    # guard and the relay's CONNECT vetting still apply.
+                    pass
+                page = await context.new_page()
+                await page.goto(
+                    url,
+                    wait_until="domcontentloaded",
+                    timeout=NAVIGATION_TIMEOUT_MS,
+                )
+                await page.wait_for_timeout(SETTLE_MS)
+                final_url = page.url
+                try:
+                    vet_url(final_url)
+                except WebError:
+                    logger.warning(
+                        "browser browse landed on a forbidden URL: %s",
+                        urlsplit(final_url).hostname,
+                    )
+                    return None
+                title = await page.title()
+                html = await page.content()
+                return {
+                    "url": final_url,
+                    "title": (title or "")[:300],
+                    "html": html[:2_000_000],
+                }
+            finally:
+                await context.close()
+        except Exception as error:
+            logger.warning(
+                "browser browse failed for %s: %s: %s",
+                urlsplit(url).hostname,
+                type(error).__name__,
+                str(error).splitlines()[0][:200] if str(error) else "",
+            )
+            if self._browser is not None and not self._browser.is_connected():
+                await self._drop_browser()
+            return None
+
     async def _search(self, query, limit, page=1):
         self._generation += 1
         offset = (page - 1) * 10
@@ -650,3 +740,57 @@ async def _block_heavy_resources(route):
         await route.abort()
     else:
         await route.continue_()
+
+
+def _vet_or_none(url):
+    try:
+        vet_url(url)
+        if proxy_for_url(url) is not None:
+            vet_proxy_url(url)
+    except WebError:
+        return False
+    return True
+
+
+async def _guard_browse_route(route):
+    """SSRF guard for browse_page: vet every request the page makes.
+
+    Chromium bypasses the egress proxy for loopback, so proxy-side
+    vetting alone cannot keep a page (or a redirect chain, or an XHR)
+    from steering the browser at this VM's own services — the devin
+    bridge, the relay, metadata endpoints. Every HTTP(S) request is
+    therefore vetted with the same rules as the HTTP tier and aborted
+    when its target is loopback, private, link-local or otherwise
+    non-public. Page-internal schemes (data:, blob:, about:) cannot
+    reach the network and pass; any other scheme is aborted. Heavy
+    resources keep the search tier's abort.
+    """
+    request = route.request
+    if request.resource_type in _BLOCKED_RESOURCE_TYPES:
+        await route.abort()
+        return
+    url = request.url
+    if url.startswith(("data:", "blob:", "about:")):
+        await route.continue_()
+        return
+    if not _vet_or_none(url):
+        await route.abort()
+        return
+    await route.continue_()
+
+
+async def _guard_browse_socket(route):
+    """The same vetting for WebSocket connections out of a browsed page.
+
+    vet_url speaks HTTP(S), so the socket scheme is translated first
+    (wss is exactly https for target purposes).
+    """
+    url = route.url
+    if url.startswith("wss://"):
+        url = "https://" + url[len("wss://"):]
+    elif url.startswith("ws://"):
+        url = "http://" + url[len("ws://"):]
+    if not _vet_or_none(url):
+        await route.close()
+        return
+    await route.connect_to_server()

@@ -15,7 +15,13 @@ from nezubot_discrod.assistant import Assistant
 from nezubot_discrod.config import SandboxSettings
 from nezubot_discrod.member_wiki import MemberWiki
 from nezubot_discrod.server_log import ServerLog
-from nezubot_discrod.server_log_context import _event_candidates, pre_retrieve, resolve_people
+from nezubot_discrod.server_log_context import (
+    OVERVIEW_SAMPLE_CHAR_LIMIT,
+    _event_candidates,
+    _person_chunks,
+    pre_retrieve,
+    resolve_people,
+)
 from nezubot_discrod.server_log_tools import LogResult, LogTools
 from nezubot_discrod.server_wiki import ServerWiki
 
@@ -201,6 +207,27 @@ def test_person_overview_survives_search_failure_and_budget_is_hard(archive, mon
     assert "Speaker overview" in result and result.sources
     tiny = asyncio.run(pre_retrieve(log, "my interests", timeout=5, budget=20))
     assert len(tiny) <= 20 and not tiny.sources
+
+
+def test_person_overview_sample_is_capped_to_leave_budget_for_evidence(tmp_path):
+    store = ServerLog(tmp_path / "logs" / "server_log.db", guild_id="100")
+    rows = []
+    for index in range(24):
+        value = record(1, channel=str(10 + index % 3), text="long post " + "y" * 500)
+        value["id"] = str(1000 + index)
+        value["timestamp"] = f"{2024 + index // 8}-{index % 12 + 1:02d}-01T00:00:00Z"
+        rows.append(value)
+    store.upsert_many(rows)
+    log = LogTools(store, [10, 11, 12], caller_id=20)
+    chunks = list(_person_chunks(log, "20", None, None, "", None, "overview"))
+    assert len(chunks) == 1
+    chunk = chunks[0]
+    assert chunk.startswith("Speaker overview")
+    assert len(chunk) <= OVERVIEW_SAMPLE_CHAR_LIMIT
+    full = store.collect(channel_ids=[10, 11, 12], author="20", limit=8)["hits"]
+    assert len(full) == 8 and len(chunk.hits) < 8
+    # Whole hits only, and the kept hits are a prefix of the sample.
+    assert [hit.id for hit in chunk.hits] == [hit.id for hit in full[:len(chunk.hits)]]
 
 
 def test_other_person_never_reads_private_member_wiki(archive, monkeypatch):
@@ -748,3 +775,78 @@ def test_assistant_persists_and_reuses_conversation_state(archive):
     # Reset clears the channel's state along with its history.
     ai.reset(10)
     assert ai.conversation_states.load("10") is None
+
+
+
+def _person_rows(author_id, username, global_name, count, *, bot=False,
+                 id_prefix="7"):
+    rows = []
+    for index in range(count):
+        value = record(1, text=f"{username} の発言 {index}")
+        value["id"] = f"{id_prefix}{index:04d}"
+        value["author"] = {"id": author_id, "username": username,
+                           "global_name": global_name, "bot": bot}
+        value["timestamp"] = f"2025-03-{(index % 28) + 1:02d}T00:00:00Z"
+        rows.append(value)
+    return rows
+
+
+def test_bare_core_of_decorated_name_resolves_to_the_person(archive):
+    # The aki shape (production, all runs before v1.33.0): the
+    # person's name is hyphen-decorated ("-aki-"), his alt carries
+    # "-aki- (sub)", and a Matrix relay bot carries persona aliases
+    # like "aki (Matrix)". The bare name existed only as the relay's
+    # stripped core, so 「akiについて」 resolved to the relay bot.
+    archive.upsert_many(
+        _person_rows("41", "akk._.u", "-aki-", 60, id_prefix="4")
+        + _person_rows("42", "akinext", "-aki- (sub)", 2, id_prefix="5")
+        + _person_rows("43", "bridgedebug", "aki (Matrix)", 3,
+                       bot=True, id_prefix="6"))
+    assert resolve_people(archive, [10], "akiについて教えて", 999) == ["41"]
+    # The decorated form itself: the person must join his own core's
+    # bucket too, or his alt (2 messages) is what the core resolves to.
+    assert resolve_people(archive, [10], "-aki-ってどんな人？", 999) == ["41"]
+
+
+def test_appellation_claim_suppresses_relay_clones(archive):
+    # The さくら shape: the string is the person's established
+    # appellation, but as a decorated alias it belongs only to his
+    # relay webhook clones. The alias path must not resolve the name
+    # to the clones alongside (or instead of) the person.
+    from nezubot_discrod.appellations import ensure_appellation_schema
+
+    archive.upsert_many(
+        _person_rows("41", "akk._.u", "-aki-", 10, id_prefix="4")
+        + _person_rows("43", "fluxer1", "さくら#abcd", 3,
+                       bot=True, id_prefix="6")
+        + _person_rows("44", "fluxer2", "さくら#abcd", 3,
+                       bot=True, id_prefix="7"))
+    with archive.connect() as db:
+        ensure_appellation_schema(db)
+        db.executemany(
+            "INSERT INTO appellations VALUES (?, ?, ?, ?, ?)",
+            [("41", "91", "さくら", 10, "2026-01-01"),
+             ("41", "92", "さくら", 9, "2026-01-01"),
+             ("41", "93", "さくら", 6, "2026-01-01")])
+    assert resolve_people(archive, [10], "さくらについて教えて", 999) == ["41"]
+
+
+def test_appellation_claim_ignores_bot_targets(archive):
+    # The vex safety property behind the suppression: when the
+    # appellation's dominant target IS the bot, the name is not
+    # claimed for a real person, so bot-named people still resolve
+    # through the bot-inclusive fallback.
+    from nezubot_discrod.appellations import ensure_appellation_schema
+    from nezubot_discrod.server_log_context import _appellation_claims_form
+
+    archive.upsert_many(
+        _person_rows("45", "vexbot", "vex", 5, bot=True, id_prefix="8"))
+    with archive.connect() as db:
+        ensure_appellation_schema(db)
+        db.executemany(
+            "INSERT INTO appellations VALUES (?, ?, ?, ?, ?)",
+            [("45", "91", "vex", 5, "2026-01-01"),
+             ("45", "92", "vex", 4, "2026-01-01")])
+        where, args = archive._scope([10], exclude_message_id=None)
+        assert _appellation_claims_form(archive, db, where, args, "vex") is False
+    assert resolve_people(archive, [10], "vexについて教えて", 999) == ["45"]

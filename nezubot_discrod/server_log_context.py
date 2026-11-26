@@ -14,6 +14,7 @@ from threading import BoundedSemaphore, Event
 from time import perf_counter
 from zoneinfo import ZoneInfo
 
+from nezubot_discrod import github_meta
 from nezubot_discrod.appellations import AppellationIndex, appellation_list
 from nezubot_discrod.appellations import person_summary as build_person_summary
 from nezubot_discrod.claim_check import (
@@ -22,6 +23,7 @@ from nezubot_discrod.claim_check import (
     detect_claim_dispute,
 )
 from nezubot_discrod.messages import Source
+from nezubot_discrod.query_rewrite import needs_rewrite
 from nezubot_discrod.reading import books_chunk
 from nezubot_discrod.server_log import (
     LEXICAL_MEMO,
@@ -49,9 +51,14 @@ _DENSE_SLOTS = BoundedSemaphore(2)
 _WIKI_SLOTS = BoundedSemaphore(2)
 _MEMBER_WIKI_SLOTS = BoundedSemaphore(2)
 _SELF = re.compile(
-    r"(?:おれ|俺|わたし|私|自分|僕|ぼく|うち)(?:の|について|は|が|を|に|と|とか|って|$)|"
+    r"(?:おれ|俺|わたし|私|自分|僕|ぼく|うち)(?:の|について|は|が|を|に|と|とか|って|誰|何者|$)|"
     r"\b(?:me|my|myself)\b", re.IGNORECASE,
 )
+# A question that turns on GitHub authorship or accounts: these get
+# the deterministic GitHub metadata block (github_meta), because the
+# archive alone cannot distinguish a repo's maker from someone who
+# pasted its URL or holds a fork of it.
+_GITHUB_TOPIC = re.compile(r"github|ギットハブ", re.IGNORECASE)
 # The shape of a question that is about a person even when no name in
 # it resolved: used only to flag the turn as person-unresolved, so the
 # caller can tell the model to make one resolution attempt of its own
@@ -104,15 +111,58 @@ _FIRST_ACTIVITY_QUESTION = re.compile(
 )
 
 
+def _first_activity_signals(text, search_text=None, context_query=None):
+    """Detection signals for the first-activity deterministic block.
+
+    direct: the latest message itself asks about a first participation
+    / earliest message (the v1.28.0 shape). topic: the CONVERSATION is
+    about a first participation even when the latest message does not
+    say so — the shape of the 2026-11-26 recurrence, where the owner's
+    follow-ups (「ひま」 as a reply to the bot's own wrong
+    first-participation answer, then 「しらべてそれを」) carried no
+    first-activity wording at all: the topic lived in the reply
+    target, whose words the rewritten query and the context query
+    already carry into pre_retrieve. A context-carried match only
+    counts when the latest message is context-dependent (a
+    rewrite-shaped follow-up, a self-reference, or a few bare
+    characters hanging on the exchange); a long self-contained
+    message about something else does not inherit the topic just
+    because a message in the window mentioned one. The third return
+    value is that context-dependence flag itself, which also gates
+    the caller fallback for the block's subject."""
+    body = (text or "").strip()
+    direct = bool(_FIRST_ACTIVITY_QUESTION.search(text or ""))
+    context_dependent = bool(
+        needs_rewrite(text) or _SELF.search(text or "") or len(body) <= 8
+    )
+    topic = direct or (
+        context_dependent
+        and bool(
+            _FIRST_ACTIVITY_QUESTION.search(search_text or "")
+            or _FIRST_ACTIVITY_QUESTION.search(context_query or "")
+        )
+    )
+    return direct, topic, context_dependent
+
+
+# Surrounding decoration punctuation is not part of the name people
+# type: "-aki-" is referred to as "aki". Without the strip, the
+# bare form existed only as the stripped core of relay accounts'
+# persona aliases ("aki (Matrix)"), so the bare name resolved to
+# the relay instead of the person.
+_DECORATION_EDGE = "-_.~・=+|/\\:;!?\"'`^ 　"
+
+
 def _alias_core(alias):
     """The bare name inside a decorated display name: bracketed segments
-    (【…】, […], （…）) removed, any ``#suffix`` (さくら#abcd) cut, and a
-    trailing honorific dropped. People refer to each other by the core,
-    so the primary alias match tries it alongside the full alias."""
+    (【…】, […], （…）) removed, any ``#suffix`` (さくら#abcd) cut, a
+    trailing honorific dropped, and surrounding decoration punctuation
+    stripped. People refer to each other by the core, so the primary
+    alias match tries it alongside the full alias."""
     core = re.sub(r"【[^】]*】|\[[^\]]*\]|[(（][^)）]*[)）]", "", alias)
     core = re.split(r"[#＃]", core, maxsplit=1)[0].strip()
     core = re.sub(r"(?:ちゃん|くん|さん|氏|さま)$", "", core).strip()
-    return core
+    return core.strip(_DECORATION_EDGE) or core
 
 
 class _AliasSnapshot:
@@ -150,7 +200,7 @@ class _AliasSnapshot:
         return self._cores
 
 
-_ALIAS_DISK_FORMAT = 1
+_ALIAS_DISK_FORMAT = 2
 _ALIAS_DISK_KEEP = 16
 
 
@@ -321,6 +371,29 @@ def _appellation_people(store, db, where, args, normalized, caller_id):
     return []
 
 
+def _appellation_claims_form(store, db, where, args, form):
+    """Whether this name string is an established appellation of a
+    real (non-bot) person in scope: the appellation graph's dominant
+    target for the string, verified against the archive. Relay and
+    bridge accounts carry their person's names as decorated aliases
+    (the さくら#abcd webhooks are aki's relay personas), so a name
+    the alias table attributes only to bots may still be a person's
+    name in the evidence that matters — and resolving it to the
+    relay, alongside or instead of the person, was the aki failure
+    family. Bot-named people (vex) are unaffected: their appellation
+    target is the bot itself, which fails the non-bot check here."""
+    index = _appellation_index(store, db)
+    if index is None:
+        return False
+    targets = index.by_appellation.get(form)
+    if not targets:
+        return False
+    dominant = AppellationIndex._dominant(targets)
+    if dominant is None:
+        return False
+    return bool(_existing_authors(db, where, args, [dominant], non_bot=True))
+
+
 def _existing_authors(db, where, args, author_ids, *, non_bot):
     """Subset of author_ids with at least one in-scope message, checked
     with one batched query instead of one query per author."""
@@ -466,9 +539,16 @@ def _resolve_people_db(db, store, where, args, channel_ids, text, caller_id,
                 pattern = r"(?<![ぁ-んァ-ヶー一-龥a-zA-Z0-9_])" + pattern
             if re.search(pattern, normalized):
                 matched.setdefault(form, set()).add(author_id)
-                break
+                # No break: a row whose full decorated name appears in
+                # the text ("-aki-って") must ALSO join its bare core's
+                # bucket ("aki" matches inside the decoration). With
+                # the break, the person himself was missing from the
+                # core bucket while his alt and his relay personas —
+                # whose full names do not appear — filled it, so the
+                # core form resolved to the alt alone and the dominance
+                # collapse never saw the person it should collapse to.
     resolved = set()
-    for form_ids in matched.values():
+    for form, form_ids in matched.items():
         if caller_id is not None and str(caller_id) in form_ids and len(form_ids) > 1:
             form_ids = {str(caller_id)}
         existing = _existing_authors(db, where, args, form_ids, non_bot=True)
@@ -476,7 +556,12 @@ def _resolve_people_db(db, store, where, args, channel_ids, text, caller_id,
             # The name may belong only to bot/bridge accounts (the
             # decorated さくら#abcd accounts are all webhooks);
             # the token fallback already resolves bot authors for
-            # ASCII names, so do the same here before giving up.
+            # ASCII names, so do the same here before giving up —
+            # unless the string is an established appellation of a
+            # real person, in which case the bots are that person's
+            # relay personas and the name is the person's, not theirs.
+            if _appellation_claims_form(store, db, where, args, form):
+                continue
             existing = _existing_authors(db, where, args, form_ids, non_bot=False)
         if len(existing) > 1:
             dominant = _dominant_author(db, where, args, existing)
@@ -541,6 +626,21 @@ def _token_fallback_people(db, snapshot, where, args, normalized):
     return sorted(_existing_authors(db, where, args, candidates, non_bot=False))
 
 
+# The overview sample is query-independent (the person's longest posts
+# per channel/time octile), yet it is selected before the query-driven
+# routes for a resolved person and the selection loop takes chunks
+# whole. Measured on the complex-QA set (2026-11-26/27): the sample's
+# median size was 3,921 chars -- 65% of the 6,000-char material budget
+# -- leaving a median of 1,990 chars for every later route, so
+# question-specific evidence chunks (median ~1,700 chars, up to ~3,400)
+# routinely no longer fit and were dropped whole. Cap the rendered
+# sample at 2,000 chars (header + first hits, whole hits only): the
+# two observed cases where a sample hit WAS the gold evidence sit at
+# 690 and 1,660 cumulative chars, so the cap keeps them while freeing
+# roughly 1,900 chars for the query-driven routes.
+OVERVIEW_SAMPLE_CHAR_LIMIT = 2000
+
+
 def _person_chunks(log, person, member_wiki, guild_id, text, message_id, part):
     if part == "overview":
         overview = log.store.collect(channel_ids=log.channel_ids, author=person, limit=8,
@@ -552,6 +652,9 @@ def _person_chunks(log, person, member_wiki, guild_id, text, message_id, part):
         excerpts = LogResult.from_hits(hits)
         header = ("Speaker overview (sample, not biography): "
                   + json.dumps(metadata, ensure_ascii=False) + "\n")
+        while len(hits) > 1 and len(header) + len(excerpts) > OVERVIEW_SAMPLE_CHAR_LIMIT:
+            hits = hits[:-1]
+            excerpts = LogResult.from_hits(hits)
         result = LogResult(header + excerpts, sources=excerpts.sources)
         # Lets the selection loop drop already-delivered sample messages
         # and rebuild the chunk from the header plus the fresh excerpts.
@@ -934,6 +1037,39 @@ async def pre_retrieve(log, text, *, member_wiki=None, guild_id=None, message_id
         if budgets.get("grounding_ms") is not None:
             grounding_deadline = started + budgets["grounding_ms"] / 1000.0
     effective_text = search_text or text
+    # First-activity detection (v1.31.0): the v1.28.0 block keyed on
+    # the latest message's own wording only, so a follow-up carrying
+    # the topic in the conversation instead of in its own words never
+    # re-armed it, and the model restated the wrong date the
+    # transcript held (the bot's own pre-fix answer). The topic
+    # signal also reads the rewritten query and the context query.
+    (first_activity_direct, first_activity_topic,
+     first_activity_context_dependent) = _first_activity_signals(
+        text, search_text, context_query)
+    fa_subject = {"source": None, "person": None}
+    fa_scheduled = set()
+
+    def first_activity_fallback_subject():
+        # The block's subject when grounding resolved nobody (in the
+        # incident it hit its deadline under load on both follow-up
+        # turns, and the seed branch of resolve_people skips a seed
+        # that IS the caller, so a marker-less follow-up about the
+        # caller's own first participation had no path to a subject):
+        # the conversation's own pointers first — the person the
+        # reply chain grounded, then the previous turn's subject —
+        # and, for a context-dependent turn, the caller, whose own
+        # first participation is what such a follow-up continues.
+        # A direct question about an unknown third party (not
+        # context-dependent, no pointers) gets no fallback: there is
+        # still no subject to describe.
+        if seed_person is not None:
+            return str(seed_person), "seed"
+        if carryover_person is not None:
+            return str(carryover_person), "carryover"
+        if first_activity_context_dependent and log.caller_id is not None:
+            return str(log.caller_id), "caller"
+        return None, None
+
     # Evidence-verification gate (claim_check.py): a turn shaped like
     # a dispute over the record gets a targeted verification search,
     # so the model answers from the archive instead of conceding an
@@ -1083,6 +1219,28 @@ async def pre_retrieve(log, text, *, member_wiki=None, guild_id=None, message_id
         chunk = books_chunk(log.store.path.with_name("reading.db"), text)
         if chunk:
             publish("books", LogResult(chunk))
+
+    def github_part(person):
+        # Deterministic GitHub metadata for a GitHub-shaped question:
+        # the resolved person's account and repos (fork-traced), or,
+        # with no settled person, the repos the question itself links.
+        # The metadata is cache-first in the archive DB, so inside the
+        # retrieval budgets this is normally a few local lookups; a
+        # cold cache spends a bounded number of API calls. The block
+        # exists because the 2026-11-27 incident turned on facts no
+        # log search can supply (a fork's holder is not its maker).
+        try:
+            block = None
+            if person is not None:
+                block = github_meta.person_github_block(
+                    log.store, log.channel_ids, person)
+            if block is None:
+                block = github_meta.text_github_block(log.store, text)
+        except Exception:
+            logger.warning("GitHub metadata block unavailable", exc_info=True)
+            block = None
+        if block:
+            publish("github_facts", LogResult(block))
 
     def claim_part():
         # The verification search behind the gate: the claim's
@@ -1333,7 +1491,12 @@ async def pre_retrieve(log, text, *, member_wiki=None, guild_id=None, message_id
                     if _ACTIVITY_QUESTION.search(text or ""):
                         jobs.append(run("person_activity", activity_part,
                                         people[0]))
-                    if _FIRST_ACTIVITY_QUESTION.search(text or ""):
+                    if first_activity_topic and \
+                            "person_first_activity" not in available:
+                        if fa_subject["source"] is None or \
+                                fa_subject["person"] == people[0]:
+                            fa_subject["source"] = "resolved"
+                            fa_subject["person"] = people[0]
                         jobs.append(run("person_first_activity",
                                         first_activity_part, people[0]))
                     jobs.extend(run(part, person_part, people[0], part)
@@ -1361,14 +1524,42 @@ async def pre_retrieve(log, text, *, member_wiki=None, guild_id=None, message_id
         lexical = asyncio.create_task(
             run("lexical_fallback", search, effective_text, None, 8, True)
         )
+        early = []
+        if first_activity_topic and "<@" not in (text or "") and (
+                not first_activity_direct or _SELF.search(text or "")):
+            # Speculative delivery for the conversational shapes: the
+            # subject comes from the conversation's pointers or the
+            # caller, never from grounding, so the job is scheduled
+            # alongside the lexical fallback instead of after the
+            # people await — under load that await eats the whole
+            # phase budget (both incident follow-ups hit the grounding
+            # deadline), and a job scheduled only after it would never
+            # run. run() shields the executor call, so the chunk still
+            # lands if the phase is cut short. An explicit @-mention
+            # in the text keeps grounding authoritative instead: no
+            # speculative delivery then.
+            subject, source = first_activity_fallback_subject()
+            if subject is not None:
+                fa_subject["source"] = source
+                fa_subject["person"] = subject
+                fa_scheduled.add(subject)
+                early.append(asyncio.create_task(
+                    run("person_summary", summary_part, subject)))
+                early.append(asyncio.create_task(
+                    run("person_first_activity", first_activity_part, subject)))
         try:
             people = await run("people", resolve_people, log.store, log.channel_ids,
                                text, log.caller_id, message_id, seed_person,
                                carryover_person, grounding_deadline) or []
             if people and aux_gate_mode == "grounding":
                 hybrid_gate["allow"] = False
-            jobs = [lexical]
+            jobs = [lexical, *early]
             jobs.append(run("books", books_part))
+            if _GITHUB_TOPIC.search(text or "") or \
+                    github_meta.extract_github_refs(text):
+                jobs.append(run(
+                    "github", github_part,
+                    people[0] if len(people) == 1 else None))
             if claim_dispute:
                 jobs.append(run("claim_check", claim_part))
             if log.store._dense is not None:
@@ -1382,11 +1573,14 @@ async def pre_retrieve(log, text, *, member_wiki=None, guild_id=None, message_id
             if reply_graph_enabled and log.store._dense is not None:
                 jobs.append(run("reply_graph", graph_part, dense=True))
             if len(people) == 1:
-                jobs.append(run("person_summary", summary_part, people[0]))
+                if people[0] not in fa_scheduled:
+                    jobs.append(run("person_summary", summary_part, people[0]))
                 if _ACTIVITY_QUESTION.search(text or ""):
                     jobs.append(run("person_activity", activity_part,
                                     people[0]))
-                if _FIRST_ACTIVITY_QUESTION.search(text or ""):
+                if first_activity_topic and people[0] not in fa_scheduled:
+                    fa_subject["source"] = "resolved"
+                    fa_subject["person"] = people[0]
                     jobs.append(run("person_first_activity",
                                     first_activity_part, people[0]))
                 jobs.extend(run(part, person_part, people[0], part)
@@ -1394,6 +1588,24 @@ async def pre_retrieve(log, text, *, member_wiki=None, guild_id=None, message_id
             elif people:
                 publish("ambiguity", LogResult("Ambiguous people; request an explicit Discord ID: "
                                                + ", ".join(people[:8])))
+            elif first_activity_topic and fa_subject["source"] is None:
+                # Grounding resolved nobody, but the conversation is
+                # settled on a first-activity topic: deliver the
+                # deterministic fact for the fallback subject instead
+                # of leaving the model to restate whatever date the
+                # transcript happens to carry. The person's summary
+                # rides along so the fact is attributed to a named
+                # account, not floated as a bare date. (The speculative
+                # early path above covers most shapes; this branch
+                # remains for direct, context-dependent shapes the
+                # early path leaves to grounding first.)
+                subject, source = first_activity_fallback_subject()
+                if subject is not None:
+                    fa_subject["source"] = source
+                    fa_subject["person"] = subject
+                    jobs.append(run("person_summary", summary_part, subject))
+                    jobs.append(run("person_first_activity",
+                                    first_activity_part, subject))
             if len(people) != 1:
                 candidates = _event_candidates(text)
                 if candidates:
@@ -1401,6 +1613,8 @@ async def pre_retrieve(log, text, *, member_wiki=None, guild_id=None, message_id
             await asyncio.gather(*jobs)
         finally:
             lexical.cancel()
+            for task in early:
+                task.cancel()
 
     status = "complete"
     phase1_status = None
@@ -1506,14 +1720,15 @@ async def pre_retrieve(log, text, *, member_wiki=None, guild_id=None, message_id
         # the whole 6,000 chars before the person's own evidence was
         # reached, so resolved questions still answered thin (A-5/A-6).
         selection_order = (
-            "claim_check", "person_summary", "person_activity",
+            "claim_check", "person_summary", "github_facts", "person_activity",
             "person_first_activity", "appellations", "author",
             "overview", "member_wiki", "server_wiki", "books",
             "ambiguity", "dense", "context", "reply_graph", "prefetch", "lexical",
         )
     else:
         selection_order = (
-            "claim_check", "dense", "context", "reply_graph", "books", "prefetch",
+            "claim_check", "github_facts", "dense", "context", "reply_graph",
+            "books", "prefetch",
             "lexical", "ambiguity",
             "person_summary", "person_activity", "person_first_activity",
             "appellations", "overview",
@@ -1576,10 +1791,12 @@ async def pre_retrieve(log, text, *, member_wiki=None, guild_id=None, message_id
         "summary_delivered": "person_summary" in counts,
         "activity_question": bool(_ACTIVITY_QUESTION.search(text or "")),
         "activity_delivered": "person_activity" in counts,
-        "first_activity_question": bool(
-            _FIRST_ACTIVITY_QUESTION.search(text or "")),
+        "first_activity_question": first_activity_direct,
+        "first_activity_topic": first_activity_topic,
+        "first_activity_subject": fa_subject["source"],
         "first_activity_delivered": "person_first_activity" in counts,
         "books_delivered": "books" in counts,
+        "github_delivered": "github_facts" in counts,
         "claim_dispute": claim_dispute,
         "claim_check_delivered": "claim_check" in counts,
         "claim_author_hits": claim_author_hits,

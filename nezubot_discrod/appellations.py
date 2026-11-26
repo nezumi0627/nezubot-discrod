@@ -31,6 +31,24 @@ otherwise harvests whatever a reply happens to start with
 The miner runs in snowflake-id order and remembers a watermark, so
 the first pass mines the whole archive and later passes (the embed
 worker's) only process new messages.
+
+A second pass mines messages with NO determined addressee (no reply
+or mention target at all). In open channel flow people address the
+person they are talking to by bare vocative — 「テストユーザーさん、…」 typed
+into the channel while he is right there — and those messages carry
+no reply/mention row, so the addressed pass structurally never sees
+the server's most-addressed member (the owner collected 469 noise
+rows and zero real names this way, and his /me 呼ばれ方 stayed at 0
+while every other member filled in). The standalone pass stays
+precise by anchoring on names that already exist: a candidate is
+only attributed when it is a known profile name (author_aliases) of
+exactly one person, or of one dominant person when a name is shared
+(a main account and its forgotten alt: the alt's 316 messages do not
+make the name shared in any meaningful sense). Referential uses
+count as evidence on purpose — a name a caller uses to refer to
+someone IS a name they call them — and the usual establishment
+thresholds downstream (multiple callers, repeated use) still decide
+what counts as an established appellation.
 """
 
 import logging
@@ -253,11 +271,53 @@ def _watermark(db):
     return int(row[0]) if row and str(row[0]).isdigit() else 0
 
 
+def _state_value(db, key):
+    row = db.execute(
+        "SELECT value FROM appellation_state WHERE key = ?", (key,)
+    ).fetchone()
+    return int(row[0]) if row and str(row[0]).isdigit() else 0
+
+
+def _set_state(db, key, value):
+    db.execute(
+        "INSERT INTO appellation_state VALUES (?, ?) "
+        "ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+        (key, str(value)),
+    )
+
+
+def _dominant_name_owner(db, owners, cache):
+    """The one person a profile name belongs to when several accounts
+    carry it: the dominant account by archived volume, under the same
+    rule resolution uses for shared names (at least 50 messages and
+    five times the runner-up). A main account and its long-dead alt
+    resolve to the main account; two active people sharing a name
+    resolve to neither (None) and the name is not attributed."""
+    if len(owners) == 1:
+        return next(iter(owners))
+    counts = []
+    for owner in owners:
+        if owner not in cache:
+            cache[owner] = db.execute(
+                "SELECT count(*) FROM messages "
+                "WHERE author_id = ? AND deleted = 0",
+                (owner,),
+            ).fetchone()[0]
+        counts.append((cache[owner], owner))
+    counts.sort(reverse=True)
+    (top_count, top), (second_count, _second) = counts[0], counts[1]
+    if top_count >= 50 and top_count >= 5 * second_count:
+        return top
+    return None
+
+
 def mine_appellations(store, *, batch_rows=5000, max_batches=None, progress=None):
     """Mine appellations from every not-yet-mined message with a
     determined addressee, in id order. Returns run statistics and
     advances the watermark. Only the appellation tables are written."""
-    stats = {"messages": 0, "pairs": 0, "candidates": 0, "batches": 0}
+    stats = {"messages": 0, "pairs": 0, "candidates": 0, "batches": 0,
+             "standalone_messages": 0, "standalone_pairs": 0,
+             "standalone_batches": 0}
     with store.connect() as db:
         ensure_appellation_schema(db)
         last = _watermark(db)
@@ -338,7 +398,86 @@ def mine_appellations(store, *, batch_rows=5000, max_batches=None, progress=None
             progress(dict(stats, watermark=last))
         if len(rows) < batch_rows:
             break
+    _mine_standalone(
+        store, known_names, batch_rows=batch_rows,
+        max_batches=max_batches, progress=progress, stats=stats)
     return stats
+
+
+def _mine_standalone(store, known_names, *, batch_rows, max_batches,
+                     progress, stats):
+    """The standalone pass: messages with no reply/mention addressee
+    at all, attributed only through known profile names (see the
+    module docstring). Own watermark, so the first run backfills the
+    whole archive and later runs are incremental like the addressed
+    pass. Writes go to the same appellations table; the two passes
+    partition the archive by construction (a message either has a
+    determined addressee or it does not), so nothing double-counts."""
+    with store.connect() as db:
+        ensure_appellation_schema(db)
+        last = _state_value(db, "last_mined_id_standalone")
+    volume_cache = {}
+    target_cache = {}
+    batches = 0
+    while max_batches is None or batches < max_batches:
+        with store.connect() as db:
+            rows = db.execute(
+                "SELECT id, author_id, text, created_at FROM messages "
+                "WHERE is_bot = 0 AND deleted = 0 AND id > ? "
+                "ORDER BY id LIMIT ?",
+                (str(last), batch_rows),
+            ).fetchall()
+            if not rows:
+                break
+            ids = [row[0] for row in rows]
+            addressed = {row[0] for row in db.execute(
+                "SELECT DISTINCT message_id FROM message_people "
+                f"WHERE message_id IN ({','.join('?' for _ in ids)}) "
+                "AND relation IN ('reply', 'mention')",
+                ids,
+            )}
+            events = []
+            names = set()
+            for message_id, author_id, text, created_at in rows:
+                if message_id in addressed:
+                    continue
+                stats["standalone_messages"] += 1
+                for candidate in extract_appellations(text):
+                    if candidate in known_names:
+                        events.append((author_id, candidate, created_at))
+                        names.add(candidate)
+            for name in names:
+                if name not in target_cache:
+                    target_cache[name] = _dominant_name_owner(
+                        db, known_names[name], volume_cache)
+        batches += 1
+        aggregate = {}
+        for author_id, candidate, created_at in events:
+            target = target_cache[candidate]
+            if target is None or str(target) == str(author_id):
+                continue
+            key = (str(target), str(author_id), candidate)
+            count, seen = aggregate.get(key, (0, ""))
+            aggregate[key] = (count + 1, max(seen, created_at or ""))
+            stats["standalone_pairs"] += 1
+        last = int(rows[-1][0])
+        with store.connect() as db:
+            db.execute("BEGIN IMMEDIATE")
+            db.executemany(
+                "INSERT INTO appellations VALUES (?, ?, ?, ?, ?) "
+                "ON CONFLICT(target_id, caller_id, appellation) DO UPDATE SET "
+                "count = count + excluded.count, "
+                "last_seen = max(last_seen, excluded.last_seen)",
+                [(target, caller, appellation, count, seen)
+                 for (target, caller, appellation), (count, seen)
+                 in aggregate.items()],
+            )
+            _set_state(db, "last_mined_id_standalone", last)
+        if progress is not None:
+            progress(dict(stats, standalone_watermark=last))
+        if len(rows) < batch_rows:
+            break
+    stats["standalone_batches"] = batches
 
 
 def qualified_appellations(rows):
