@@ -43,6 +43,25 @@ def embeddable_text(text):
     return len(_MEANINGFUL_CHARS.findall(normalized)) >= 2
 
 
+def embedding_prefix(model, *, query=False):
+    """Instruction prefix for an embedding model lineage, or "".
+
+    e5 models are trained with "query: "/"passage: " instructions and
+    ruri-v3 with "検索クエリ: "/"検索文書: ". The prefix is part of the
+    vector contract: stored document vectors were encoded with it, so
+    queries (and newly embedded documents) must use the same one. An
+    unknown lineage gets no prefix — never guess an instruction
+    format, because a wrong prefix silently shifts every vector away
+    from the stored ones.
+    """
+    name = (model or "").lower()
+    if "e5" in name:
+        return "query: " if query else "passage: "
+    if name.startswith("cl-nagoya/ruri-v3"):
+        return "検索クエリ: " if query else "検索文書: "
+    return ""
+
+
 def _blas_limiter(np):
     try:
         from threadpoolctl import threadpool_limits
@@ -113,6 +132,7 @@ class DenseIndex:
         self.snapshot_mode = False
         self.sequence = None
         self.model = store.model
+        self.contextual = str(store.model or "").endswith("-ctx")
         self.static_model = None
         # Hybrid retrieval: an optional second dense path (e.g. a
         # fine-tuned model) whose vectors live under aux_model. It needs
@@ -177,9 +197,7 @@ class DenseIndex:
         return self._encode_with(self.embedder, self.store.model, texts, query=query)
 
     def _encode_with(self, embedder, model, texts, *, query=False):
-        prefix = ""
-        if "e5" in model.lower():
-            prefix = "query: " if query else "passage: "
+        prefix = embedding_prefix(model, query=query)
         if query:
             # Register as a waiting query so passage (document) encoding
             # yields the embedder between batches instead of re-acquiring
@@ -222,17 +240,43 @@ class DenseIndex:
             raise ValueError("Zero embedding output")
         return vectors / norms
 
-    def _embedding_order(self, rows):
-        texts = [embedding_text(row) for row in rows]
+    def _embedding_order(self, rows, texts=None):
+        if texts is None:
+            texts = [embedding_text(row) for row in rows]
+            order = self._length_order(texts)
+            return [rows[i] for i in order]
+        texts = list(texts)
+        if len(texts) != len(rows):
+            raise ValueError("texts must align with rows")
+        order = self._length_order(texts)
+        return [rows[i] for i in order], [texts[i] for i in order]
+
+    def _length_order(self, texts):
         tokenizer = getattr(getattr(self.embedder, "model", None), "tokenizer", None)
         if tokenizer is None:
             lengths = list(map(len, texts))
         else:
-            prefix = "passage: " if "e5" in self.store.model.lower() else ""
+            prefix = embedding_prefix(self.store.model, query=False)
             with self.lock:
                 lengths = [sum(value.attention_mask) for value in
                            tokenizer.encode_batch([prefix + text for text in texts])]
-        return [rows[i] for i in sorted(range(len(rows)), key=lengths.__getitem__)]
+        return sorted(range(len(texts)), key=lengths.__getitem__)
+
+    def _contextual_texts(self, rows, parent_by_id):
+        texts = []
+        for row in rows:
+            parent = None
+            reply_to = row["reply_to"] if "reply_to" in row.keys() else None
+            if reply_to:
+                parent = parent_by_id.get(str(reply_to))
+            if parent is not None:
+                texts.append(
+                    f"{parent['author_name']}: {parent['text'][:100]}\n"
+                    f"{row['author_name']}: {row['text']}"
+                )
+            else:
+                texts.append(embedding_text(row))
+        return texts
 
     def embed_pending(self, batch_size, progress, stop):
         total = 0
@@ -262,6 +306,21 @@ class DenseIndex:
                         params += [cursor[0], cursor[0], cursor[1]]
                     query += "ORDER BY m.created_at DESC, m.id DESC LIMIT ?"
                     fetched = db.execute(query, (*params, limit)).fetchall()
+                    parent_by_id = {}
+                    if self.contextual and fetched:
+                        parent_ids = sorted({
+                            str(row["reply_to"]) for row in fetched
+                            if row["reply_to"]
+                        })
+                        if parent_ids:
+                            parent_by_id = {
+                                str(parent["id"]): parent
+                                for parent in db.execute(
+                                    "SELECT * FROM messages WHERE id IN "
+                                    f"({','.join('?' for _ in parent_ids)})",
+                                    parent_ids,
+                                ).fetchall()
+                            }
                 if not fetched:
                     break
                 cursor = fetched[-1]["created_at"], fetched[-1]["id"]
@@ -270,12 +329,21 @@ class DenseIndex:
                     if len(fetched) < limit:
                         break
                     continue
-                rows = self._embedding_order(rows)
+                if self.contextual:
+                    texts = self._contextual_texts(rows, parent_by_id)
+                    rows, texts = self._embedding_order(rows, texts)
+                else:
+                    rows = self._embedding_order(rows)
+                    texts = None
                 for start in range(0, len(rows), batch_size):
                     if stop.is_set():
                         break
                     batch = rows[start:start + batch_size]
-                    vectors = self.encode([embedding_text(row) for row in batch])
+                    if texts is not None:
+                        batch_texts = texts[start:start + batch_size]
+                    else:
+                        batch_texts = [embedding_text(row) for row in batch]
+                    vectors = self.encode(batch_texts)
                     with self.store.connect() as db:
                         db.execute("BEGIN IMMEDIATE")
                         written = 0

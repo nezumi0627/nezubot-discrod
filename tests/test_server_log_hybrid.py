@@ -3,6 +3,7 @@ fallback equivalence, and hybrid embedding of pending messages."""
 import pytest
 
 from nezubot_discrod.server_log import ServerLog, _fusion, rrf
+from nezubot_discrod.server_log_dense import embedding_prefix
 
 
 def record(number=1, *, channel="10", author="alice", text="Rust 検索エンジン",
@@ -225,3 +226,59 @@ def test_aux_skipped_when_search_is_author_scoped(tmp_path):
     store.search("hybrid", channel_ids=[10], require_dense=True,
                  snapshot_only=True, allow_hybrid=False)
     assert ft.inputs == []
+
+
+# ---- embedding prefixes per model lineage -------------------------------------
+
+def test_embedding_prefix_lineages():
+    # e5 keeps its historical instructions on both sides.
+    assert embedding_prefix("intfloat/multilingual-e5-small", query=True) == "query: "
+    assert embedding_prefix("intfloat/multilingual-e5-small") == "passage: "
+    assert embedding_prefix("intfloat/multilingual-e5-small-ft1", query=True) == "query: "
+    assert embedding_prefix("intfloat/multilingual-e5-small-ft1") == "passage: "
+    assert embedding_prefix("intfloat/multilingual-e5-small-static") == "passage: "
+    # ruri-v3 uses its own Japanese instructions.
+    assert embedding_prefix("cl-nagoya/ruri-v3-70m", query=True) == "検索クエリ: "
+    assert embedding_prefix("cl-nagoya/ruri-v3-70m") == "検索文書: "
+    assert embedding_prefix("cl-nagoya/ruri-v3-130m", query=True) == "検索クエリ: "
+    # Unknown lineages get no prefix: never guess an instruction format.
+    assert embedding_prefix("some/other-model", query=True) == ""
+    assert embedding_prefix("some/other-model") == ""
+    assert embedding_prefix(None, query=True) == ""
+    assert embedding_prefix("") == ""
+
+
+def test_e5_hybrid_document_prefix_unchanged(tmp_path):
+    teacher, ft = TeacherEmbedder(), FtEmbedder()
+    store = hybrid_store(tmp_path, teacher=teacher, ft=ft)
+    store.upsert_many([record(1, text="semantic topic")])
+    store.embed_pending()
+    assert store.embed_pending_hybrid() == 1
+    assert "passage: alice: semantic topic" in ft.inputs
+
+
+def test_ruri_hybrid_prefixes_on_documents_and_queries(tmp_path):
+    teacher, ruri = TeacherEmbedder(), FtEmbedder()
+    store = ServerLog(
+        tmp_path / "ruri" / "server_log.db",
+        model="intfloat/multilingual-e5-large",
+        embedder=teacher,
+        hybrid_model="cl-nagoya/ruri-v3-70m",
+        hybrid_embedder=ruri,
+    )
+    store.upsert_many([
+        record(1, text="semantic topic"),
+        record(2, text="hybrid topic"),
+    ])
+    store.embed_pending()
+    assert store.embed_pending_hybrid() == 2
+    # Documents are embedded under the ruri document instruction, over
+    # the same "{author}: {text}" body the stored production vectors use.
+    assert "検索文書: alice: semantic topic" in ruri.inputs
+    assert "検索文書: alice: hybrid topic" in ruri.inputs
+    store.enable_dense()
+    ruri.inputs.clear()
+    store.search("semantic hybrid", channel_ids=[10], limit=10)
+    # Queries go through the ruri query instruction, not the e5 one.
+    assert "検索クエリ: semantic hybrid" in ruri.inputs
+    assert not any(text.startswith("query: ") for text in ruri.inputs)

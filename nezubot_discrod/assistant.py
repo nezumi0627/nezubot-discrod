@@ -8,6 +8,12 @@ from collections import OrderedDict
 from time import monotonic
 
 from nezubot_discrod.ambient import ambient_excluded, skip_answer
+from nezubot_discrod.claim_check import (
+    CLAIM_CHECK_HEADER,
+    claim_denies_authorship,
+    compose_claim_floor,
+    draft_concedes,
+)
 from nezubot_discrod.config import SandboxSettings
 from nezubot_discrod.conversation_state import (
     ConversationStateStore,
@@ -44,6 +50,7 @@ from nezubot_discrod.sandbox import run_command
 from nezubot_discrod.server_log import format_hits
 from nezubot_discrod.server_log_context import ROUTE_BUDGETS_MS, pre_retrieve
 from nezubot_discrod.server_log_tools import LOG_PARAMETERS, LOG_TOOLS, LogTools
+from nezubot_discrod.turn_context import start_turn
 from nezubot_discrod.weather_tools import WEATHER_PARAMETERS, WEATHER_TOOLS, jst_now_view
 from nezubot_discrod.web_guard import OutboundGuard
 from nezubot_discrod.web_tools import WEB_PARAMETERS, WEB_TOOLS, has_web_content
@@ -391,6 +398,89 @@ class Assistant:
             self._prefetch_inflight.discard(cache_key)
         self.prefetch_cache.put(scope_channels, key, hits, query)
 
+    async def _revise_claim_draft(
+        self, *, model, messages, draft, wiki, log, history_key,
+        private_read, self_improve, evidence="",
+    ):
+        """One evidence-based re-answer for a conceded dispute draft.
+
+        The draft-inspection half of the evidence gate (claim_check):
+        the pre-retrieval half put the verification evidence in front
+        of the model, but the hardest duel case still conceded —
+        reading the contradicting messages and apologizing anyway.
+        When the gate fired, evidence was delivered, and the draft
+        still concedes (draft_concedes), the turn gets exactly one
+        tool-free re-answer over the same context, with the draft
+        quoted in the nudge so the model must engage with what it
+        was about to say. Any failure keeps the original draft; a
+        revision that itself concedes is delivered as-is (no loop).
+        """
+        nudge = (
+            "【下書きの見直し】あなたの下書き（このターンの回答案）は、"
+            "記録に関する未検証の主張への同意や謝罪を含んでいます。"
+            f"下書き: 「{draft[:600]}」 "
+            "payload の claim_dispute と、retrieved_server_context の"
+            "「主張の検証」ブロックを見直し、特に話者本人の過去発言が"
+            "主張と食い違うかどうかを確かめて、答え直してください。"
+            "食い違う本人の発言がある場合は、その発言（日時と短い引用）"
+            "を根拠に、主張をそのまま認めずに答えてください。"
+            "資料が主張を裏付ける場合だけ、その根拠を述べて訂正を"
+            "受け入れてください。決着しない場合は「記録では確認"
+            "できない」と述べ、謝罪や全面同意で済ませないでください。"
+            "下書きをそのまま繰り返さないでください。"
+        )
+        if evidence:
+            # Hand the revision the verified hits themselves, not
+            # just a pointer to the block: the first-pass failure was
+            # the model reading these messages and discounting them,
+            # so the nudge states the one hard fact they establish —
+            # the disputed words exist in the speaker's own messages.
+            nudge += (
+                "\n検証で見つかった話者本人の発言（アーカイブ実在）:\n"
+                + evidence
+                + "\n本人が実際にその語で発言している以上、「私の発言"
+                "ではない」という主張は、その部分については記録上"
+                "成り立ちません。その事実を根拠として述べてください。"
+            )
+        revision_messages = [*messages, {"role": "user", "content": nudge}]
+        try:
+            if is_devin_model(model) and self.devin_responder is not None:
+                revised = await self.devin_responder(
+                    build_devin_prompt(revision_messages))
+                return revised if revised and revised.strip() else None
+            if self.wiki_completion is not None and (
+                wiki is not None or log is not None or self.web is not None
+                or self_improve is not None
+            ):
+                # Tool-free (arbiter) shape, like Assistant.arbitrate:
+                # the Codex client refuses tool-free turns that are
+                # handed conversation tools, and the re-answer needs
+                # none — every piece of evidence is already inline in
+                # the messages.
+                response = await self.wiki_completion(
+                    model=model,
+                    messages=revision_messages,
+                    arbiter=True,
+                )
+            else:
+                response = await self.client.chat.completions.create(
+                    model=model,
+                    messages=revision_messages,
+                    tools=[],
+                    max_tokens=2000,
+                )
+            message = response.choices[0].message
+            if getattr(message, "tool_calls", None):
+                return None
+            revised = (message.content or "").strip()
+            return revised or None
+        except Exception:
+            logger.warning(
+                "Claim gate revision failed; keeping the draft",
+                exc_info=True,
+            )
+            return None
+
     async def reply(
         self,
         channel_id: int,
@@ -407,6 +497,13 @@ class Assistant:
         ambient=False,
         self_improve=None,
     ) -> str:
+        # One correlation id for everything this turn logs: the
+        # retrieval diagnostics, the provider completion line and
+        # the completion line at the bottom of this method all carry
+        # it (via the contextvar for the stages deeper in the call
+        # chain), so a turn's waterfall can be rebuilt from bot.log
+        # instead of paired by file order.
+        turn_id = start_turn()
         ambient = bool(ambient and self.system_prompt == SYSTEM)
         if ambient or self.system_prompt != SYSTEM:
             self_improve = None
@@ -516,6 +613,9 @@ class Assistant:
         recent_urls = []
         private_read = bool(turns)
         retrieval_task = None
+        claim_gate_active = False
+        claim_evidence = ""
+        claim_author_hits = []
         if log is not None and not ambient and not web_lookup and not instant_lookup \
                 and not server_fact:
             automatic_channels = (
@@ -657,6 +757,66 @@ class Assistant:
                                 "and any ID in the message). If that also "
                                 "finds nobody, say what you tried.",
                     }
+                if diagnostics.get("claim_dispute"):
+                    # Evidence-verification gate: the speaker disputes
+                    # a fact about the record. Their claim is unverified
+                    # by definition; pre_retrieve has already run the
+                    # verification search (its hits ride in
+                    # retrieved_server_context under a 主張の検証
+                    # header). State the status explicitly so the
+                    # model answers from that evidence instead of
+                    # conceding — the surrender pattern a prompt-only
+                    # instruction demonstrably failed to fix.
+                    if diagnostics.get("claim_check_delivered"):
+                        claim_note = (
+                            "The speaker is disputing a factual claim "
+                            "about the record (what was said, who said "
+                            "it, what happened). The claim itself is "
+                            "UNVERIFIED. The retrieved context carries "
+                            "a 主張の検証 (claim check) block: an archive "
+                            "search run on the claim's keywords, the "
+                            "speaker's own messages first. Answer from "
+                            "that evidence: if the speaker's own past "
+                            "messages contradict the claim, say so with "
+                            "the record; if the evidence supports the "
+                            "speaker, accept the correction with its "
+                            "basis; if it settles nothing, say the "
+                            "record does not confirm the claim rather "
+                            "than conceding it as fact."
+                        )
+                    else:
+                        claim_note = (
+                            "The speaker is disputing a factual claim "
+                            "about the record (what was said, who said "
+                            "it, what happened). The claim itself is "
+                            "UNVERIFIED, and the application's keyword "
+                            "search of the archive found nothing that "
+                            "settles it. Do not concede the claim as "
+                            "fact and do not retract the earlier "
+                            "statement as proven wrong: say the record "
+                            "does not confirm it, and what (if anything) "
+                            "the record does show."
+                        )
+                    payload["claim_dispute"] = {
+                        "status": "unverified",
+                        "note": claim_note,
+                    }
+                    # The draft-inspection half of the gate arms only
+                    # when the verification search actually delivered
+                    # evidence: without it there is nothing stronger
+                    # to re-answer from than the draft had.
+                    claim_gate_active = bool(
+                        diagnostics.get("claim_check_delivered"))
+                    claim_author_hits = (
+                        diagnostics.get("claim_author_hits") or [])
+                    if claim_gate_active:
+                        # The verification block as rendered into the
+                        # payload (the result object carries no chunk
+                        # list): from its header marker onward.
+                        rendered = str(retrieved)
+                        marker = rendered.find(CLAIM_CHECK_HEADER[:8])
+                        if marker >= 0:
+                            claim_evidence = rendered[marker:marker + 1200]
                 turn_people = resolved
                 settled = (
                     resolved[0] if len(resolved) == 1
@@ -718,16 +878,29 @@ class Assistant:
             # never arrive here with a Devin model — the fallback
             # above has already replaced it with the default.
             usage_known = False
+            devin_started = monotonic()
+            devin_status = "ok"
             try:
                 answer = await self.devin_responder(build_devin_prompt(messages))
             except DevinAnswerError as error:
+                devin_status = f"error:{error.kind}"
                 logger.warning(
                     "Devin answer failed (kind=%s): %s", error.kind, error
                 )
                 answer = devin_failure_message(error.kind, self.model)
             except Exception:
+                devin_status = "error:unexpected"
                 logger.exception("Devin answer failed unexpectedly")
                 answer = devin_failure_message("failed", self.model)
+            # The Codex path logs a per-turn completion line
+            # ("Codex turn finished ..."); the Devin path had none,
+            # so its turns were the unpairable remainder in the
+            # 2026-11-26 timing measurement. Same shape here.
+            logger.info(
+                "Devin turn finished in %.1fs (turn_id=%s, model=%s, "
+                "status=%s)",
+                monotonic() - devin_started, turn_id, model, devin_status,
+            )
             if answer is not None and not answer.strip():
                 answer = "応答が空でした。もう一度お試しください。"
         for iteration in range(self.max_iterations) if answer is None else ():
@@ -861,6 +1034,46 @@ class Assistant:
                 answer += "ツールの実行回数上限に達しました。"
             else:
                 answer = "ツールの実行回数上限に達しました。依頼を短くして再試行してください。"
+        if (
+            claim_gate_active and not ambient
+            and self.system_prompt == SYSTEM
+            and draft_concedes(answer)
+        ):
+            # Evidence gate, draft inspection: the verification
+            # evidence was delivered and the draft still concedes the
+            # unverified claim — the exact duel #30 failure shape,
+            # which the pre-retrieval half alone did not flip (the
+            # model read the contradicting messages and apologized
+            # anyway). One re-answer, then the result stands.
+            logger.info(
+                "Claim gate: revising a concession draft (turn_id=%s)",
+                turn_id,
+            )
+            revised = await self._revise_claim_draft(
+                model=model, messages=messages, draft=answer,
+                wiki=wiki, log=log, history_key=history_key,
+                private_read=private_read, self_improve=self_improve,
+                evidence=claim_evidence,
+            )
+            if revised:
+                answer = revised
+        if (
+            claim_gate_active and claim_author_hits
+            and claim_denies_authorship(content)
+            and not ambient and self.system_prompt == SYSTEM
+            and len(answer) <= 300 and draft_concedes(answer)
+        ):
+            # Deterministic floor, the gate's last layer: the model
+            # conceded twice (draft and revision) on an authorship
+            # denial, while the verification search had already
+            # found the disputed words in the speaker's own
+            # messages. The answer is then composed by code from
+            # those verified hits alone — existence, dates, quotes —
+            # correcting the blanket denial without adjudicating
+            # anything the record does not settle.
+            logger.info(
+                "Claim gate: floor applied (turn_id=%s)", turn_id)
+            answer = compose_claim_floor(claim_author_hits)
         answer = verify_inline_links(
             strip_small_text(answer), [*sources, *retrieved_sources, *recent_urls]
         )
@@ -905,7 +1118,8 @@ class Assistant:
         while len(self.history) > self.max_channels:
             self.history.popitem(last=False)
         logger.info(
-            "Assistant turn finished in %.1fs", monotonic() - turn_started,
+            "Assistant turn finished in %.1fs (turn_id=%s)",
+            monotonic() - turn_started, turn_id,
         )
         return Reply(answer, usage=tuple(usage) if usage_known else None,
                      sources=clean_sources([*sources, *used_sources(answer, retrieved_sources)]))

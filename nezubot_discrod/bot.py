@@ -4,8 +4,8 @@ import logging
 import os
 import sqlite3
 import time
-from collections import OrderedDict
-from typing import Literal
+from collections import OrderedDict, deque
+from typing import Literal, NamedTuple
 from urllib.parse import unquote, urlsplit
 
 import aiohttp
@@ -73,6 +73,7 @@ from nezubot_discrod.prompts import (
     WIKI_GUIDANCE,
 )
 from nezubot_discrod.ranking import build_rank_embed, collect_ranking
+from nezubot_discrod.reading import build_bookshelf_embed, collect_bookshelf
 from nezubot_discrod.sandbox import accepting_work, run_command_enabled
 from nezubot_discrod.selfmod import ImprovementService
 from nezubot_discrod.server_log import ServerLog, format_hits, message_record
@@ -357,6 +358,26 @@ async def show_rank(interaction, bot):
         )
         return
     await interaction.followup.send(embed=build_rank_embed(ranking), ephemeral=True)
+
+
+async def show_bookshelf(interaction, bot):
+    if interaction.guild_id != bot.settings.guild_id:
+        await interaction.response.send_message("指定サーバーでのみ利用できます。", ephemeral=True)
+        return
+    await interaction.response.defer(ephemeral=True)
+    try:
+        books = await asyncio.to_thread(
+            collect_bookshelf, bot.server_log.path.with_name("reading.db")
+        )
+    except Exception:
+        logger.exception("/bookshelf: book collection failed")
+        await interaction.followup.send(
+            "本棚の取得に失敗した。時間をおいて再試行してね。", ephemeral=True
+        )
+        return
+    await interaction.followup.send(
+        embed=build_bookshelf_embed(books), ephemeral=True
+    )
 
 
 async def show_model(interaction, bot, choice):
@@ -668,6 +689,33 @@ async def deliver_answer(channel, question, answer, parts):
     return sent
 
 
+# Per-channel turn queue (v1.27.0): while a channel's answer turn is
+# running, further triggers wait in a FIFO queue and are answered in
+# arrival order, instead of being dropped silently (the v1.9.1 busy
+# drop). The cap counts messages WAITING behind the running turn, per
+# channel; it is a spam guard that normal use never reaches. Override
+# with BOT_CHANNEL_QUEUE_LIMIT (0 disables queueing).
+DEFAULT_TURN_QUEUE_LIMIT = 8
+
+# How many channels may hold a turn slot at once (unchanged from the
+# pre-queue busy gate); triggers for a further channel are dropped.
+MAX_BUSY_CHANNELS = 16
+
+
+def _turn_queue_limit():
+    raw = os.environ.get("BOT_CHANNEL_QUEUE_LIMIT", "")
+    try:
+        value = int(raw)
+    except ValueError:
+        return DEFAULT_TURN_QUEUE_LIMIT
+    return value if value >= 0 else DEFAULT_TURN_QUEUE_LIMIT
+
+
+class _QueuedTurn(NamedTuple):
+    message: object
+    content: str
+
+
 class Bot(discord.Client):
     def __init__(self, settings: Settings):
         intents = discord.Intents.default()
@@ -744,6 +792,7 @@ class Bot(discord.Client):
         # centrally instead of per handler.
         self.tree.interaction_check = _slash_gate
         self.busy = set()
+        self.turn_queues = {}
         self.slots = asyncio.Semaphore(4)
         self.improvements = ImprovementService(settings)
         self.improvement_tasks = set()
@@ -795,6 +844,10 @@ class Bot(discord.Client):
         @self.tree.command(name="rank", description="メッセージ数ランキングを表示（自分だけ表示）")
         async def rank_command(interaction: discord.Interaction):
             await show_rank(interaction, self)
+
+        @self.tree.command(name="bookshelf", description="読書の時間の本棚を表示（自分だけ表示）")
+        async def bookshelf_command(interaction: discord.Interaction):
+            await show_bookshelf(interaction, self)
 
         @self.tree.command(name="model", description="自分の回答モデルを切り替え（自分だけ表示）")
         @app_commands.describe(model="切り替えるモデル（自分の回答だけに効く）")
@@ -989,7 +1042,7 @@ class Bot(discord.Client):
                 )
                 return
         # n! prefix commands fire without a mention, ahead of the call
-        # check and the busy gate, so n!del stays reachable
+        # check and the turn queue, so n!del stays reachable
         # while an answer is being generated.
         if parse_prefix_command(message.content or "") is not None:
             await handle_prefix_command(self, message)
@@ -997,15 +1050,6 @@ class Bot(discord.Client):
         if message.guild is not None and not await is_call(message, self.user):
             return
         channel = message.channel
-        if channel.id in self.busy or len(self.busy) >= 16:
-            # Busy gate: drop the trigger silently. A "busy, retry later"
-            # notice posted to the channel is noise the owner asked to
-            # remove (2026-11-24); the drop stays visible in the log only.
-            logger.info(
-                "Dropping message in busy channel %s (busy=%d)",
-                channel.id, len(self.busy),
-            )
-            return
         content = (
             message.content.replace(f"<@{self.user.id}>", "")
             .replace(f"<@!{self.user.id}>", "")
@@ -1039,84 +1083,172 @@ class Bot(discord.Client):
                 )
                 await channel.send(REFUSAL_TEXT)
                 return
+        # Turn slot + per-channel FIFO queue (v1.27.0). Every gate
+        # above has passed, so a message that reaches this point is
+        # entitled to an answer: while the channel's turn is running,
+        # further triggers wait in the queue and are answered in
+        # arrival order instead of being dropped silently (the
+        # v1.9.1 busy drop). Two drops remain, both INFO-logged and
+        # neither reachable in normal use: the per-channel waiting
+        # cap (spam guard) and the global busy-channel cap. No
+        # "busy, retry later" notice is posted either way — a visible
+        # notice is noise the owner asked to remove (2026-11-24).
+        if channel.id in self.busy:
+            queue = _turn_queue(self, channel.id, create=True)
+            if len(queue) >= _turn_queue_limit():
+                logger.info(
+                    "Dropping message in channel %s: turn queue full "
+                    "(%d waiting)",
+                    channel.id, len(queue),
+                )
+                return
+            queue.append(_QueuedTurn(message, content))
+            logger.info(
+                "Queued message in busy channel %s (waiting=%d)",
+                channel.id, len(queue),
+            )
+            return
+        if len(self.busy) >= MAX_BUSY_CHANNELS:
+            logger.info(
+                "Dropping message in channel %s: too many busy "
+                "channels (busy=%d)",
+                channel.id, len(self.busy),
+            )
+            return
         self.busy.add(channel.id)
         try:
-            conversation = await build_conversation_context(message, self.user.id)
-            async with self.slots:
+            job = _QueuedTurn(message, content)
+            from_queue = False
+            while job is not None:
+                if from_queue:
+                    waiting = _turn_queue(self, channel.id)
+                    logger.info(
+                        "Processing queued message in channel %s "
+                        "(waiting=%d)",
+                        channel.id, len(waiting) if waiting else 0,
+                    )
                 try:
-                    channel_ids = await allowed_channel_ids(self, message.author)
-                    retrieval = {}
-                    if channel_ids:
-                        retrieval["retrieval_channel_ids"] = audience_channel_ids(
-                            self, channel, channel_ids,
-                        )
-                    async with channel.typing():
-                        improvement = {}
-                        if message.author.id == self.settings.owner_id:
-                            improvement = {"self_improve": improvement_callback(
-                                self.improvements, message, self.improvement_tasks, self.user.id
-                            )}
-                        answer = await self.assistant.reply(
-                            channel.id,
-                            content,
-                            member_id=message.author.id,
-                            speaker_names={
-                                "username": getattr(message.author, "name", None),
-                                "display_name": getattr(message.author, "display_name", None),
-                                "server_nickname": getattr(message.author, "nick", None),
-                            },
-                            guild_id=message.guild.id if message.guild else None,
-                            guild_info=guild_facts(message.guild),
-                            channel_ids=channel_ids,
-                            **retrieval,
-                            message_id=message.id,
-                            **({"conversation": conversation} if conversation else {}),
-                            **improvement,
-                        )
+                    await _run_turn(self, job)
                 except Exception:
-                    logger.exception("AI request failed (channel %s)", channel.id)
-                    answer = "AI への接続に失敗しました。時間をおいて再試行してください。"
-                # Moderation layer 2 (POLICY.md): when the model
-                # refused a policy-violating request it ends its
-                # answer with a hidden [[policy:<category>]] marker.
-                # Strip the marker here — on the delivered text, so
-                # the Codex and Devin paths are covered alike — and
-                # record the violation silently. The strip always
-                # runs so a marker never leaks into a message;
-                # recording exempts the owner inside record_violation.
-                cleaned, flagged = extract_policy_marker(answer)
-                if flagged is not None:
-                    answer = Reply(
-                        cleaned,
-                        usage=getattr(answer, "usage", None),
-                        sources=getattr(answer, "sources", ()),
+                    # One failed turn must not strand the messages
+                    # queued behind it; discord.py would have logged
+                    # an escape from on_message the same way.
+                    logger.exception(
+                        "AI turn failed (channel %s)", channel.id
                     )
-                    await apply_policy_violation(
-                        self,
-                        message.author,
-                        flagged,
-                        source="model",
-                        excerpt=content,
-                        channel=channel,
-                    )
-                footer_model = self.settings.model
-                if getattr(self, "server_log", None) is not None:
-                    try:
-                        footer_model = await asyncio.to_thread(
-                            resolve_model,
-                            self.server_log,
-                            message.author.id,
-                            self.settings.model,
-                        )
-                    except Exception:
-                        # The footer is cosmetic; never lose the
-                        # answer over a failed override lookup.
-                        pass
-                parts = split_reply(answer, footer_model)
-                sent = await deliver_answer(channel, content, answer, parts)
-                record_answer_authors(self, sent, message.author.id)
+                queue = _turn_queue(self, channel.id)
+                job = queue.popleft() if queue else None
+                from_queue = job is not None
         finally:
             self.busy.discard(channel.id)
+            queue = _turn_queue(self, channel.id)
+            if queue is not None and not queue:
+                queues = getattr(self, "turn_queues", None)
+                if queues is not None:
+                    queues.pop(channel.id, None)
+
+def _turn_queue(bot, channel_id, *, create=False):
+    """The channel's FIFO of waiting turns (None when absent).
+
+    Lazily created so lightweight stand-ins for the bot in tests
+    do not need the attribute pre-set.
+    """
+    queues = getattr(bot, "turn_queues", None)
+    if queues is None:
+        queues = bot.turn_queues = {}
+    if create:
+        return queues.setdefault(channel_id, deque())
+    return queues.get(channel_id)
+
+
+async def _run_turn(bot, job):
+    """Run one answer turn for a message that passed every gate.
+
+    Runs for the message that took the channel's turn slot and,
+    in arrival order, for each message that waited in the
+    channel's queue. The wait happens before this is called, so
+    queueing never counts against the turn's own timeout. Both
+    answer paths (Codex and Devin) run inside Assistant.reply,
+    so queued turns take whichever path the member's model
+    choice selects, exactly like an unqueued turn.
+    """
+    message = job.message
+    content = job.content
+    channel = message.channel
+    conversation = await build_conversation_context(message, bot.user.id)
+    async with bot.slots:
+        try:
+            channel_ids = await allowed_channel_ids(bot, message.author)
+            retrieval = {}
+            if channel_ids:
+                retrieval["retrieval_channel_ids"] = audience_channel_ids(
+                    bot, channel, channel_ids,
+                )
+            async with channel.typing():
+                improvement = {}
+                if message.author.id == bot.settings.owner_id:
+                    improvement = {"self_improve": improvement_callback(
+                        bot.improvements, message, bot.improvement_tasks, bot.user.id
+                    )}
+                answer = await bot.assistant.reply(
+                    channel.id,
+                    content,
+                    member_id=message.author.id,
+                    speaker_names={
+                        "username": getattr(message.author, "name", None),
+                        "display_name": getattr(message.author, "display_name", None),
+                        "server_nickname": getattr(message.author, "nick", None),
+                    },
+                    guild_id=message.guild.id if message.guild else None,
+                    guild_info=guild_facts(message.guild),
+                    channel_ids=channel_ids,
+                    **retrieval,
+                    message_id=message.id,
+                    **({"conversation": conversation} if conversation else {}),
+                    **improvement,
+                )
+        except Exception:
+            logger.exception("AI request failed (channel %s)", channel.id)
+            answer = "AI への接続に失敗しました。時間をおいて再試行してください。"
+        # Moderation layer 2 (POLICY.md): when the model
+        # refused a policy-violating request it ends its
+        # answer with a hidden [[policy:<category>]] marker.
+        # Strip the marker here — on the delivered text, so
+        # the Codex and Devin paths are covered alike — and
+        # record the violation silently. The strip always
+        # runs so a marker never leaks into a message;
+        # recording exempts the owner inside record_violation.
+        cleaned, flagged = extract_policy_marker(answer)
+        if flagged is not None:
+            answer = Reply(
+                cleaned,
+                usage=getattr(answer, "usage", None),
+                sources=getattr(answer, "sources", ()),
+            )
+            await apply_policy_violation(
+                bot,
+                message.author,
+                flagged,
+                source="model",
+                excerpt=content,
+                channel=channel,
+            )
+        footer_model = bot.settings.model
+        if getattr(bot, "server_log", None) is not None:
+            try:
+                footer_model = await asyncio.to_thread(
+                    resolve_model,
+                    bot.server_log,
+                    message.author.id,
+                    bot.settings.model,
+                )
+            except Exception:
+                # The footer is cosmetic; never lose the
+                # answer over a failed override lookup.
+                pass
+        parts = split_reply(answer, footer_model)
+        sent = await deliver_answer(channel, content, answer, parts)
+        record_answer_authors(bot, sent, message.author.id)
 
 
 async def search_logs(interaction, bot, query):

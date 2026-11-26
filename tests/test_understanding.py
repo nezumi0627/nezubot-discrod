@@ -33,11 +33,19 @@ def me_store(tmp_path):
         value["id"] = str(200 + index)
         value["author"] = {"id": "999", "username": "testuser", "bot": False}
         rows.append(value)
+    # A second caller: an appellation counts as established for /me
+    # only when more than one person uses it.
+    for index in range(3):
+        value = record(1, channel="10", text=f"タヌキ、それな {index}")
+        value["id"] = str(300 + index)
+        value["author"] = {"id": "888", "username": "someone", "bot": False}
+        rows.append(value)
     store.upsert_many(rows)
     with store.connect() as db:
         db.executemany(
             "INSERT INTO message_people VALUES (?, '30', 'reply', 1.0)",
-            [(str(200 + index),) for index in range(5)],
+            [(str(200 + index),) for index in range(5)]
+            + [(str(300 + index),) for index in range(3)],
         )
         db.execute(
             "INSERT INTO users (user_id, guild_id, username, display_name, nickname) "
@@ -59,6 +67,28 @@ def test_collect_understanding_scores_from_real_rows(me_store):
     assert parts["person_graph"]["score"] > 0
     # Nobody has used /me yet.
     assert report["priority_tier"] is False
+
+
+def test_collect_understanding_counts_only_established_appellations(me_store):
+    # Pre-repair shape: one caller's repeated fragment plus a pile of
+    # one-off strings. None of it may inflate the /me counts, and the
+    # representative name stays the genuinely shared one.
+    with me_store.connect() as db:
+        db.execute(
+            "INSERT INTO appellations VALUES ('30', '999', 'へんじ', 16, '')"
+        )
+        db.executemany(
+            "INSERT INTO appellations VALUES ('30', ?, ?, 1, '')",
+            [(str(500 + index), f"かけら{index}") for index in range(30)],
+        )
+    report = collect_understanding(me_store, "30")
+    part = report["parts"]["appellations"]
+    # Only タヌキ (8 uses, 2 callers) is established.
+    assert "呼び名 1 種" in part["detail"]
+    assert "証拠 8 件" in part["detail"]
+    assert "呼び手 2 人" in part["detail"]
+    assert "「タヌキ」" in part["detail"]
+    assert part["score"] < 1.0
 
 
 def test_collect_understanding_unknown_person_is_zero(tmp_path):

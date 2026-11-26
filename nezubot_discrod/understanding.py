@@ -22,7 +22,11 @@ import logging
 import sqlite3
 from datetime import UTC, datetime, timedelta
 
-from nezubot_discrod.appellations import AppellationIndex, mine_appellations
+from nezubot_discrod.appellations import (
+    mine_appellations,
+    qualified_appellations,
+    representative_appellation,
+)
 from nezubot_discrod.server_log import _name
 
 logger = logging.getLogger(__name__)
@@ -125,14 +129,25 @@ def collect_understanding(store, user_id, *, server_wiki_path=None):
         except sqlite3.OperationalError:
             tier_row = None
 
-    index = AppellationIndex(appellation_rows)
-    evidence = sum(int(row[3]) for row in appellation_rows)
-    callers = len({str(row[1]) for row in appellation_rows})
-    names = len({row[2] for row in appellation_rows})
-    top = index.global_top(user_id)
+    # Only established appellations count: raw mined rows are mostly
+    # one-off sentence fragments (and, before the 2026-11-25 repair,
+    # bot boilerplate), and counting them raw reported 1,033 "names"
+    # for one member and pinned this score at full marks for anyone
+    # with a busy reply history. The saturation points are set from
+    # the measured post-repair magnitudes of well-known members
+    # (tens of established uses, around ten distinct callers), so a
+    # full score has to be earned across all three components.
+    qualified = qualified_appellations(appellation_rows)
+    evidence = sum(total for total, _callers in qualified.values())
+    callers = len({
+        str(row[1])
+        for row in appellation_rows if row[2] in qualified
+    })
+    names = len(qualified)
+    top = representative_appellation(qualified)
     appellation_score = _clamp(
-        0.4 * min(1.0, evidence / 25.0)
-        + 0.3 * min(1.0, callers / 6.0)
+        0.4 * min(1.0, evidence / 60.0)
+        + 0.3 * min(1.0, callers / 10.0)
         + 0.3 * (1.0 if top else 0.0)
     )
     embedded_score = _clamp(embedded / total_messages) if total_messages else 0.0

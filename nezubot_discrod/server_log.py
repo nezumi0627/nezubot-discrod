@@ -31,6 +31,15 @@ logger = logging.getLogger(__name__)
 _CREATE_LOCK = Lock()
 DEFAULT_MODEL = "intfloat/multilingual-e5-large"
 
+# Retrieval shape constants. These are the single definitions the
+# search code reads; nezubot_discrod.self_description builds the bot's
+# spoken self-description from the same values, so the two cannot
+# drift apart.
+POOL_FLOOR = 200  # candidate-pool floor in ServerLog.search
+RRF_K = 60  # reciprocal-rank-fusion constant in rrf()
+REPLY_GRAPH_SEED_LIMIT = 30  # fused hits seeding reply-graph expansion
+REPLY_GRAPH_MAX_NEIGHBORS = 50  # cap on neighbours that expansion adds
+
 # Per-turn lexical sharing: pre_retrieve runs a lexical-fallback search and
 # (inside each dense-path search) the identical standalone-bm25 FTS query.
 # When a memo is installed in this context, searches with the same
@@ -134,6 +143,20 @@ def text_hash(row):
     return hashlib.sha256(embedding_text(row).encode()).hexdigest()
 
 
+class SearchHits(list):
+    """Fused-search result carrying aux (hybrid) instrumentation.
+
+    Early-return paths (lexical-only, empty, no-query) return a plain
+    list; only the fusion path returns this subclass, so callers read
+    the aux attributes with getattr defaults.
+    """
+
+    def __init__(self, values=(), *, aux_fired=False, aux_hits=0):
+        super().__init__(values)
+        self.aux_fired = bool(aux_fired)
+        self.aux_hits = int(aux_hits)
+
+
 @dataclass(frozen=True)
 class LogHit:
     id: str
@@ -177,7 +200,7 @@ def rrf(lists, limit=50):
     scores = {}
     for items in lists:
         for rank, item in enumerate(items, 1):
-            scores[item] = scores.get(item, 0) + 1 / (60 + rank)
+            scores[item] = scores.get(item, 0) + 1 / (RRF_K + rank)
     return sorted(scores, key=lambda item: (-scores[item], item))[:limit]
 
 
@@ -819,7 +842,7 @@ class ServerLog:
         channel_ids = tuple(sorted({str(c) for c in channel_ids}))
         if not channel_ids or (not query.strip() and author is None):
             return []
-        pool = max(50, limit)
+        pool = max(POOL_FLOOR, limit)
         with self.connect() as db:
             db.execute("BEGIN")
             if infer_author or author is not None:
@@ -930,46 +953,63 @@ class ServerLog:
             logger.info("Server log search mode=dense partial=%s coverage=%s",
                         getattr(dense, "partial", False), getattr(dense, "coverage", None))
             extra_dense = None
-            # The hybrid (aux) path only earns its place when person
-            # grounding came up empty: measured on real questions, its
-            # gains were all in grounding-miss cases, while on scoped
-            # questions it dilutes the author-focused ranking. Callers
-            # that know the grounding outcome pass allow_hybrid=False;
-            # an author resolved here (explicit or inferred) counts as
-            # scoped too.
-            if allow_hybrid and author is None and self.hybrid_model and self._dense is not None:
-                aux_ms = budgets.get("aux_ms")
-                aux_started = perf_counter()
-                try:
-                    aux_search = (
-                        self._dense.search_aux_snapshot if snapshot_only
-                        else self._dense.search_aux
-                    )
-                    extra_dense = aux_search(
-                        db, query, channel_ids, where, args, pool, author_ids=author,
-                        channel=channel, after=after, before=before,
-                    )
-                except Exception:
-                    logger.warning(
-                        "Hybrid dense search unavailable; using two-path fusion",
-                        exc_info=True,
-                    )
-                    extra_dense = None
+            # The hybrid (aux) path's gating is the caller's decision:
+            # pre_retrieve passes allow_hybrid according to its aux
+            # gate mode (SERVER_LOG_AUX_GATE; "always" by default since
+            # v1.29.0, "grounding" restores the pre-v1.29 behaviour of
+            # suppressing aux once a person resolves). An author
+            # resolved here (explicit or inferred) still counts as
+            # scoped and suppresses aux regardless of the caller.
+            with stage("aux"):
                 if (
-                    extra_dense is not None and aux_ms is not None
-                    and (perf_counter() - aux_started) * 1000 > aux_ms
+                    allow_hybrid and author is None
+                    and self.hybrid_model and self._dense is not None
                 ):
-                    logger.info(
-                        "Hybrid route exceeded its budget (%.0fms > %sms); discarding",
-                        (perf_counter() - aux_started) * 1000, aux_ms,
-                    )
-                    extra_dense = None
+                    aux_ms = budgets.get("aux_ms")
+                    aux_started = perf_counter()
+                    try:
+                        aux_search = (
+                            self._dense.search_aux_snapshot if snapshot_only
+                            else self._dense.search_aux
+                        )
+                        extra_dense = aux_search(
+                            db, query, channel_ids, where, args, pool, author_ids=author,
+                            channel=channel, after=after, before=before,
+                        )
+                    except Exception:
+                        logger.warning(
+                            "Hybrid dense search unavailable; using two-path fusion",
+                            exc_info=True,
+                        )
+                        extra_dense = None
+                    if (
+                        extra_dense is not None and aux_ms is not None
+                        and (perf_counter() - aux_started) * 1000 > aux_ms
+                    ):
+                        logger.info(
+                            "Hybrid route exceeded its budget (%.0fms > %sms); discarding",
+                            (perf_counter() - aux_started) * 1000, aux_ms,
+                        )
+                        extra_dense = None
             ids = _fusion(query, lexical, dense, pool,
                           partial=getattr(dense, "partial", False),
                           dense_coverage=getattr(dense, "coverage", None),
                           extra_dense=extra_dense)[:limit]
             if not ids:
                 return []
+            # Aux instrumentation: fired means extra_dense survived its
+            # budget check and actually participated in fusion (the
+            # partial/low-coverage branch of _fusion ignores it).
+            _partial = getattr(dense, "partial", False)
+            _coverage = getattr(dense, "coverage", None)
+            _fusion_ignored_extra = _partial and (
+                _coverage is None or _coverage < 0.9
+            )
+            aux_fired = bool(extra_dense) and not _fusion_ignored_extra
+            aux_hits = (
+                len(set(ids) & set(extra_dense))
+                if aux_fired else 0
+            )
             # Reapply scope on the final materialization as well as both rankers.
             rows = db.execute(
                 f"SELECT m.* FROM messages m WHERE {where} "
@@ -977,7 +1017,10 @@ class ServerLog:
                 [*args, *ids],
             ).fetchall()
             by_id = {row["id"]: _hit(row) for row in rows}
-            return [by_id[item] for item in ids if item in by_id]
+            return SearchHits(
+                [by_id[item] for item in ids if item in by_id],
+                aux_fired=aux_fired, aux_hits=aux_hits,
+            )
 
     def collect(self, *, channel_ids, query="", author=None, limit=24, offset=0,
                 exclude_message_id=None):

@@ -95,32 +95,136 @@ def test_message_routes_discord_identity_to_the_assistant(guild):
     channel.send.assert_awaited_once_with("reply\n-# test")
 
 
-@pytest.mark.parametrize("busy", [{1}, set(range(16))])
-def test_busy_gate_drops_message_silently(busy):
-    # The busy gate must never post a "処理中です" style notice to the
-    # channel: the trigger is dropped without any visible message.
+def _turn_bot(*, busy=(), reply=None):
+    """Fake bot + channel wired for on_message turn/queue tests."""
     user = SimpleNamespace(id=99)
     channel = SimpleNamespace(id=1, send=AsyncMock(), typing=Mock(side_effect=asyncio.Lock))
     bot = SimpleNamespace(
         settings=settings(),
         user=user,
-        busy=busy,
+        busy=set(busy),
+        turn_queues={},
         slots=asyncio.Semaphore(4),
-        assistant=SimpleNamespace(reply=AsyncMock(return_value="reply")),
+        assistant=SimpleNamespace(reply=reply or AsyncMock(return_value="reply")),
+        get_guild=Mock(return_value=None),
+        improvements=SimpleNamespace(settings=settings()),
+        improvement_tasks=set(),
     )
-    message = SimpleNamespace(
+    return bot, channel, user
+
+
+def _mention(user, channel, text, *, author_id=456, message_id=1000):
+    return SimpleNamespace(
         author=SimpleNamespace(
-            id=456, bot=False, name="testuser", display_name="テストユーザー", nick=None,
+            id=author_id, bot=False, name="testuser", display_name="テストユーザー", nick=None,
         ),
-        content="<@99> hello",
+        content=f"<@{user.id}> {text}",
         guild=SimpleNamespace(id=123),
         channel=channel,
         mentions=[user],
-        id=1000,
+        id=message_id,
     )
-    asyncio.run(Bot.on_message(bot, message))
+
+
+def _blocking_reply(calls, started, release):
+    """Assistant.reply fake: the first call blocks until released."""
+
+    async def reply(channel_id, content, **kwargs):
+        calls.append(content)
+        if len(calls) == 1:
+            started.set()
+            await release.wait()
+        return f"answer:{content}"
+
+    return AsyncMock(side_effect=reply)
+
+
+def test_queued_messages_are_answered_in_arrival_order():
+    # Regression for the 2026-11-26 18:31 incident: three mentions in
+    # one channel while the first turn is still running must ALL be
+    # answered, in arrival order — the v1.9.1 busy drop silently
+    # discarded every trigger after the first.
+    async def run():
+        bot, channel, user = _turn_bot()
+        calls = []
+        started, release = asyncio.Event(), asyncio.Event()
+        bot.assistant.reply = _blocking_reply(calls, started, release)
+        first = asyncio.create_task(
+            Bot.on_message(bot, _mention(user, channel, "one", message_id=1001))
+        )
+        await started.wait()
+        await Bot.on_message(bot, _mention(user, channel, "two", message_id=1002))
+        await Bot.on_message(bot, _mention(user, channel, "three", message_id=1003))
+        assert calls == ["one"]
+        assert len(bot.turn_queues[1]) == 2
+        release.set()
+        await first
+        assert calls == ["one", "two", "three"]
+        assert channel.send.await_count == 3
+        assert bot.busy == set()
+        assert bot.turn_queues == {}
+
+    asyncio.run(run())
+
+
+def test_queue_cap_drops_only_the_overflow(monkeypatch, caplog):
+    # The waiting cap is a spam guard: with room for 2 waiting, the
+    # 4th rapid trigger is the only one dropped, and only in the log
+    # — never as a visible "busy" notice in the channel.
+    monkeypatch.setenv("BOT_CHANNEL_QUEUE_LIMIT", "2")
+
+    async def run():
+        bot, channel, user = _turn_bot()
+        calls = []
+        started, release = asyncio.Event(), asyncio.Event()
+        bot.assistant.reply = _blocking_reply(calls, started, release)
+        first = asyncio.create_task(
+            Bot.on_message(bot, _mention(user, channel, "one", message_id=1001))
+        )
+        await started.wait()
+        for index, text in enumerate(["two", "three", "four"], start=1002):
+            await Bot.on_message(bot, _mention(user, channel, text, message_id=index))
+        assert len(bot.turn_queues[1]) == 2
+        release.set()
+        await first
+        assert calls == ["one", "two", "three"]
+        assert channel.send.await_count == 3
+
+    with caplog.at_level("INFO", logger="nezubot_discrod.bot"):
+        asyncio.run(run())
+    assert "turn queue full" in caplog.text
+
+
+def test_busy_channel_cap_still_drops_new_channels():
+    # 16 other channels already hold turn slots: a trigger for a new
+    # channel is dropped (INFO log only), never posted to the channel
+    # and never queued.
+    bot, channel, user = _turn_bot(busy=set(range(2, 18)))
+    asyncio.run(Bot.on_message(bot, _mention(user, channel, "hello")))
     channel.send.assert_not_awaited()
     bot.assistant.reply.assert_not_awaited()
+    assert bot.turn_queues == {}
+
+
+def test_blacklisted_user_is_never_queued(tmp_path):
+    # The blacklist gate sits ahead of the queue: a listed member's
+    # trigger is dropped at the gate even while the channel is busy,
+    # and nothing of theirs enters the queue.
+    from nezubot_discrod.blacklist import add_to_blacklist, init_blacklist
+    from nezubot_discrod.server_log import ServerLog
+
+    store = ServerLog(tmp_path / "logs" / "server_log.db", guild_id="123")
+    init_blacklist(store)
+    add_to_blacklist(store, 777)
+    bot, channel, user = _turn_bot(busy={1})
+    bot.server_log = store
+    bot.archive = AsyncMock()
+    asyncio.run(
+        Bot.on_message(bot, _mention(user, channel, "hello", author_id=777))
+    )
+    bot.assistant.reply.assert_not_awaited()
+    channel.send.assert_not_awaited()
+    assert not bot.turn_queues.get(1)
 
 
 def _reply_setup(*, resolved, fetch_result=None):

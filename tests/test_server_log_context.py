@@ -225,9 +225,11 @@ def test_unresolved_mentions_never_fall_back_to_caller_or_alias(archive, monkeyp
     result = asyncio.run(pre_retrieve(LogTools(archive, [10], caller_id=20), question,
                                      member_wiki=memory, guild_id=100))
     assert not result
-    assert search.call_count == 2
-    assert all(call.kwargs["author"] is None and call.kwargs["limit"] == 8
-               for call in search.call_args_list)
+    # v1.29.0: the reply-graph job adds one capture search (limit 30,
+    # author None) alongside the lexical fallback and dense searches.
+    assert search.call_count == 3
+    assert sorted(call.kwargs["limit"] for call in search.call_args_list) == [8, 8, 30]
+    assert all(call.kwargs["author"] is None for call in search.call_args_list)
     memory.for_member.assert_not_called()
 
 
@@ -256,6 +258,12 @@ def test_first_person_topic_keeps_other_authors_evidence(archive, monkeypatch, q
     assert "Python advice from another person" in result
     assert "Speaker overview" in result and len(result) <= 6000
     dense_calls = [call for call in calls if not call["lexical_only"]]
+    # v1.29.0: the reply-graph job adds one capture search (limit 30);
+    # it runs concurrently with the dense job, so it is checked
+    # separately from the dense job's own ordered calls.
+    graph_calls = [call for call in dense_calls if call["limit"] == 30]
+    dense_calls = [call for call in dense_calls if call["limit"] != 30]
+    assert [(call["author"], call["limit"]) for call in graph_calls] == [(None, 30)]
     assert [(call["author"], call["limit"]) for call in dense_calls] == [(None, 3), ("20", 5)]
     assert all(call["channel_ids"] == log.channel_ids for call in calls)
     assert all(call["require_dense"] for call in dense_calls)

@@ -1,6 +1,7 @@
 import asyncio
 import json
 import logging
+import os
 import queue
 import re
 import sqlite3
@@ -15,16 +16,28 @@ from zoneinfo import ZoneInfo
 
 from nezubot_discrod.appellations import AppellationIndex, appellation_list
 from nezubot_discrod.appellations import person_summary as build_person_summary
+from nezubot_discrod.claim_check import (
+    CLAIM_CHECK_HEADER,
+    claim_keywords,
+    detect_claim_dispute,
+)
 from nezubot_discrod.messages import Source
+from nezubot_discrod.reading import books_chunk
 from nezubot_discrod.server_log import (
     LEXICAL_MEMO,
+    REPLY_GRAPH_MAX_NEIGHBORS,
+    REPLY_GRAPH_SEED_LIMIT,
     DenseSnapshotUnavailable,
     ServerLog,
     new_lexical_memo,
 )
+from nezubot_discrod.server_log import (
+    _hit as _log_hit,
+)
 from nezubot_discrod.server_log_timing import CURRENT, Timings, stage
 from nezubot_discrod.server_log_tools import LogResult
 from nezubot_discrod.server_wiki import ServerWiki
+from nezubot_discrod.turn_context import current_turn_id
 
 logger = logging.getLogger(__name__)
 _SQL_POOL = ThreadPoolExecutor(max_workers=8, thread_name_prefix="context-sql")
@@ -68,6 +81,26 @@ _ACTIVITY_QUESTION = re.compile(
     r"(?:話し|発言|投稿)(?:た|てた)の?(?:は|って)?いつ|"
     r"前回(?:は|いつ)|最近いつ|久しぶり|顔出|"
     r"ラストに(?:話し|発言)"
+)
+# The mirror shape: a question that asks WHEN a person FIRST spoke
+# (「初参加の日にち探して」「最初の発言はいつ？」). The deterministic
+# answer — the person's min(created_at) — is likewise supplied by no
+# retrieval route: the overview header carries a raw first_seen inside
+# a JSON blob (unrendered, unlabelled, and its samples are
+# time-stratified rather than chronological), and free search is
+# relevance-ordered, so hits near any date are mostly OTHER people's
+# messages. Left to those, the model composes a date from whatever hit
+# it read last; on 2026-11-26 it answered the owner's 「初参加」 with
+# 2026-10-23 11:58 UTC, a timestamp of other people's messages (the
+# true earliest for his account is 2026-07-18). Questions matching
+# this shape get a mechanically aggregated person_first_activity
+# chunk instead.
+_FIRST_ACTIVITY_QUESTION = re.compile(
+    r"初参加|初発言|初投稿|初メッセージ|"
+    r"最初の(?:発言|投稿|メッセージ)|最初に(?:話し|発言|投稿|来)|"
+    r"初めての?(?:話し|発言|投稿|メッセージ|参加)|初めて来|"
+    r"参加した(?:のは|日)|参加日|いつ参加|加入した(?:のは|日)|"
+    r"いつから(?:.{0,10}?(?:いる|居る|参加|来)|ここに)"
 )
 
 
@@ -627,6 +660,41 @@ def _person_activity(store, channel_ids, person, *, message_id=None, now=None):
     return LogResult("\n".join(lines))
 
 
+def _person_first_activity(store, channel_ids, person, *, message_id=None):
+    """Deterministic earliest-activity fact for one resolved person.
+
+    One scoped lookup by author id, oldest first — the mirror of
+    _person_activity for the 「初参加／最初の発言はいつ」 shape. The
+    result is the earliest message THIS ACCOUNT has in the archive,
+    which is not necessarily the person's absolute first participation
+    (an account change can predate it) and is not Discord's server-join
+    timestamp itself, so the header instructs the model to present it
+    with that reservation instead of as an unqualified join date."""
+    person = str(person)
+    with store.connect() as db:
+        where, args = store._scope(
+            channel_ids, author=(person,), exclude_message_id=message_id)
+        first = db.execute(
+            f"SELECT m.created_at, m.channel_name, m.text FROM messages m "
+            f"WHERE {where} ORDER BY m.created_at ASC, m.id ASC LIMIT 1",
+            args,
+        ).fetchone()
+    if first is None:
+        return None
+    lines = [
+        "最初の発言（確定情報）: 以下はアーカイブの実レコードから機械的に集計した"
+        "このアカウントの最古の発言。検索ヒットやサンプルの日付から初参加日を"
+        "組み立てず、「初参加／最初の発言はいつ」型の質問にはこの値で答えること。"
+        "ただしこれはDiscordのサーバー参加日時そのものではなく、アーカイブ内で"
+        "このアカウントについて確認できる最古の発言であり、アカウント変更等で"
+        "それ以前の参加があり得るため、「アーカイブで確認できる最古は」と留保を"
+        "付けて答えること。"
+    ]
+    line, _ = _activity_line("最初の発言", first)
+    lines.append(line)
+    return LogResult("\n".join(lines))
+
+
 _QUOTED_PHRASE = re.compile(r"[「『]([^」』]{2,60})[」』]")
 _ASCII_RUN = re.compile(r"[A-Za-z0-9]+(?:[ ._-]+[A-Za-z0-9]+)*")
 
@@ -839,9 +907,22 @@ async def pre_retrieve(log, text, *, member_wiki=None, guild_id=None, message_id
     skipped = []
     failures = []
     people = []
-    # The hybrid (aux) path is enabled only while grounding has not
-    # settled on anyone; work() closes the gate once people resolve.
+    # Aux (hybrid) gate mode, read per turn: "always" (the v1.29.0
+    # default) never closes the gate, so aux fires even when grounding
+    # resolves a person; "grounding" restores the pre-v1.29 behaviour
+    # where work() closes the gate once people resolve (rollback).
+    aux_gate_mode = (
+        "grounding"
+        if os.environ.get("SERVER_LOG_AUX_GATE", "always").strip().lower()
+        == "grounding"
+        else "always"
+    )
     hybrid_gate = {"allow": True}
+    aux_stats = {"fired": False, "hits": 0}
+    reply_graph_enabled = (
+        os.environ.get("SERVER_LOG_REPLY_GRAPH", "on").strip().lower() != "off"
+    )
+    reply_graph_stats = {"seeds": 0, "neighbors": 0}
     route_budgets = None
     grounding_deadline = None
     if budgets is not None:
@@ -853,6 +934,15 @@ async def pre_retrieve(log, text, *, member_wiki=None, guild_id=None, message_id
         if budgets.get("grounding_ms") is not None:
             grounding_deadline = started + budgets["grounding_ms"] / 1000.0
     effective_text = search_text or text
+    # Evidence-verification gate (claim_check.py): a turn shaped like
+    # a dispute over the record gets a targeted verification search,
+    # so the model answers from the archive instead of conceding an
+    # unchecked claim (the vex-duel #19/#30 surrender pattern).
+    claim_dispute = detect_claim_dispute(text)
+    # Filled by claim_part (author-scoped pass only): which disputed
+    # keywords occur in the speaker's own messages. Consumed by the
+    # Assistant's deterministic floor via the diagnostics dict.
+    claim_author_hits = []
     prefetch_list = [
         hit for hit in (prefetch_hits or []) if str(hit.id) != str(message_id)
     ]
@@ -862,7 +952,7 @@ async def pre_retrieve(log, text, *, member_wiki=None, guild_id=None, message_id
             chunks.put((kind, chunk))
 
     def search(query_text, author, limit, lexical_only=False, kind=None,
-               budgets_override=None):
+               budgets_override=None, capture=None):
         with stage("lexical_search" if lexical_only else "dense_search"):
             try:
                 hits = log.store.search(query_text[:2000], channel_ids=log.channel_ids,
@@ -876,6 +966,16 @@ async def pre_retrieve(log, text, *, member_wiki=None, guild_id=None, message_id
                                                        else route_budgets))
             except DenseSnapshotUnavailable:
                 skipped.append("dense_snapshot")
+                if capture is not None:
+                    capture["hits"] = []
+                return
+            # Aux instrumentation carried on the fusion path's result
+            # (plain lists on early-return paths default to no aux).
+            if getattr(hits, "aux_fired", False):
+                aux_stats["fired"] = True
+            aux_stats["hits"] += int(getattr(hits, "aux_hits", 0) or 0)
+            if capture is not None:
+                capture["hits"] = hits
                 return
             if hits:
                 if kind is None:
@@ -956,9 +1056,191 @@ async def pre_retrieve(log, text, *, member_wiki=None, guild_id=None, message_id
         if chunk is not None:
             publish("person_activity", chunk)
 
+    def first_activity_part(person):
+        # Deterministic earliest-activity fact for a 「初参加はいつ？」
+        # question: the mirror of activity_part for the person's
+        # first word instead of their last. Without it the model
+        # composed a first-participation date from other people's
+        # search hits on 2026-11-26.
+        try:
+            chunk = _person_first_activity(
+                log.store, log.channel_ids, person, message_id=message_id)
+        except (OSError, sqlite3.Error):
+            chunk = None
+        if chunk is not None:
+            publish("person_first_activity", chunk)
+
     def event_part(candidates):
         for chunk in _event_chunks(log, candidates, message_id):
             publish("server_wiki", chunk)
+
+    def books_part():
+        # The reading-time library: for development questions only,
+        # up to three kept books (title + one-line summary + URL) as
+        # one small chunk. books_chunk gates on the question being
+        # about development and on the library existing, so ordinary
+        # turns pay nothing for this route.
+        chunk = books_chunk(log.store.path.with_name("reading.db"), text)
+        if chunk:
+            publish("books", LogResult(chunk))
+
+    def claim_part():
+        # The verification search behind the gate: the claim's
+        # keywords against the speaker's own messages first (a
+        # self-contradiction in their own words is the decisive
+        # evidence), then against the whole archive (who actually
+        # said it). Lexical only, so the check stays inside the
+        # existing route budgets and works even while the dense
+        # snapshot is unavailable. The first chunk carries the
+        # header (via the prefix mechanism, like the overview) that
+        # marks the claim itself as unverified.
+        keywords = claim_keywords(text)
+        query = " ".join(keywords) if keywords else text
+        header_pending = True
+        for author in (log.caller_id, None):
+            try:
+                hits = log.store.search(
+                    query[:2000], channel_ids=log.channel_ids,
+                    author=author, limit=5, require_dense=False,
+                    infer_author=author is not None,
+                    exclude_message_id=message_id,
+                    lexical_only=True, snapshot_only=False,
+                    allow_hybrid=False,
+                    # The store's default 450 ms lexical deadline is
+                    # calibrated for question-shaped queries; a claim
+                    # query's bigrams chunk into several scans and the
+                    # decisive (rare-term) chunk may sit behind common
+                    # ones, so the gate gets a larger — still bounded —
+                    # share of pre_retrieve's hard cap.
+                    route_budgets={"lexical_ms": 1200},
+                )
+            except Exception:
+                logger.warning(
+                    "Claim check search unavailable", exc_info=True)
+                return
+            if hits:
+                if author is not None:
+                    for keyword in keywords:
+                        matching = [h for h in hits if keyword in h.text]
+                        for hit in matching[:2]:
+                            entry = {
+                                "keyword": keyword,
+                                "date": str(hit.date)[:10],
+                                "text": hit.text[:80],
+                            }
+                            # The search can surface the same message
+                            # twice (chunk overlap); one quote per
+                            # distinct text is enough.
+                            if entry not in claim_author_hits:
+                                claim_author_hits.append(entry)
+                        if len({h["keyword"]
+                                for h in claim_author_hits}) >= 3:
+                            break
+                chunk = LogResult.from_hits(hits)
+                chunk.hits = hits
+                if header_pending:
+                    # Exactly one header, on the first chunk that
+                    # actually delivers evidence.
+                    chunk.prefix = CLAIM_CHECK_HEADER
+                    header_pending = False
+                publish("claim_check", chunk)
+
+    def graph_part():
+        # Reply-graph expansion (v1.29.0): the fused top hits
+        # (REPLY_GRAPH_SEED_LIMIT) are seeds; each seed's parent (its
+        # reply_to) and its children
+        # (messages whose reply_to points at the seed) are delivered
+        # as one extra chunk, so a hit's conversational context comes
+        # with it instead of depending on the rankers surfacing the
+        # neighbouring messages on their own.
+        if not reply_graph_enabled:
+            return
+        capture = {}
+        search(effective_text, None, REPLY_GRAPH_SEED_LIMIT, capture=capture)
+        seed_hits = list(capture.get("hits") or [])
+        reply_graph_stats["seeds"] = len(seed_hits)
+        if not seed_hits:
+            return
+        seed_ids = [str(hit.id) for hit in seed_hits]
+        seed_set = set(seed_ids)
+        try:
+            with log.store.connect() as db:
+                seed_rows = db.execute(
+                    "SELECT id, reply_to FROM messages "
+                    f"WHERE id IN ({','.join('?' for _ in seed_ids)})",
+                    seed_ids,
+                ).fetchall()
+                reply_by_seed = {
+                    str(row["id"]): (
+                        str(row["reply_to"]) if row["reply_to"] else None
+                    )
+                    for row in seed_rows
+                }
+                parent_ids = sorted({
+                    parent for parent in reply_by_seed.values()
+                    if parent and parent not in seed_set
+                    and parent != str(message_id)
+                })
+                where, args = log.store._scope(
+                    log.channel_ids, exclude_message_id=message_id)
+                parent_by_id = {}
+                if parent_ids:
+                    parent_by_id = {
+                        str(row["id"]): row
+                        for row in db.execute(
+                            f"SELECT m.* FROM messages m WHERE {where} "
+                            f"AND m.id IN ({','.join('?' for _ in parent_ids)})",
+                            [*args, *parent_ids],
+                        ).fetchall()
+                    }
+                child_rows = db.execute(
+                    f"SELECT m.* FROM messages m WHERE {where} "
+                    f"AND m.reply_to IN ({','.join('?' for _ in seed_ids)}) "
+                    "ORDER BY m.created_at, m.id",
+                    [*args, *seed_ids],
+                ).fetchall()
+        except (OSError, sqlite3.Error):
+            logger.warning("Reply graph expansion unavailable", exc_info=True)
+            return
+        children_by_seed = {}
+        for row in child_rows:
+            if str(row["id"]) in seed_set:
+                continue
+            children_by_seed.setdefault(str(row["reply_to"]), []).append(row)
+        neighbors = []
+        seen = set(seed_set)
+        if message_id is not None:
+            seen.add(str(message_id))
+        for seed_id in seed_ids:
+            if len(neighbors) >= REPLY_GRAPH_MAX_NEIGHBORS:
+                break
+            parent_id = reply_by_seed.get(seed_id)
+            if (
+                parent_id and parent_id not in seen
+                and parent_id in parent_by_id
+            ):
+                neighbors.append(_log_hit(parent_by_id[parent_id]))
+                seen.add(parent_id)
+                if len(neighbors) >= REPLY_GRAPH_MAX_NEIGHBORS:
+                    break
+            for row in children_by_seed.get(seed_id, []):
+                child_id = str(row["id"])
+                if child_id in seen:
+                    continue
+                neighbors.append(_log_hit(row))
+                seen.add(child_id)
+                if len(neighbors) >= REPLY_GRAPH_MAX_NEIGHBORS:
+                    break
+        reply_graph_stats["neighbors"] = len(neighbors)
+        if not neighbors:
+            return
+        chunk = LogResult.from_hits(neighbors)
+        chunk.hits = neighbors
+        chunk.prefix = (
+            "Reply graph expansion: parent and reply messages of the "
+            "search hits above, added by reply-graph expansion.\n"
+        )
+        publish("reply_graph", chunk)
 
     def dense_search(people):
         search(effective_text, None, 3 if len(people) == 1 else 8)
@@ -1016,10 +1298,19 @@ async def pre_retrieve(log, text, *, member_wiki=None, guild_id=None, message_id
             target.setdefault(kind, []).append(chunk)
 
     summary_state = {"retried": False}
+    claim_state = {"retried": False}
 
     async def extension_round(weak):
         nonlocal people
         jobs = []
+        if (claim_dispute and not claim_state["retried"]
+                and "claim_check" not in available):
+            # The verification search missed the first pass (its
+            # unchunked lexical scan is the slowest job here under
+            # load); it is the turn's decisive evidence, so it gets
+            # the same one-retry treatment as the person summary.
+            claim_state["retried"] = True
+            jobs.append(run("claim_check", claim_part))
         if "person_summary" in weak and len(people) == 1:
             # The identity line did not survive the first pass (slot
             # contention or the phase deadline); fetch it on its own.
@@ -1033,7 +1324,8 @@ async def pre_retrieve(log, text, *, member_wiki=None, guild_id=None, message_id
             ) or []
             if retry:
                 people = retry
-                hybrid_gate["allow"] = False
+                if aux_gate_mode == "grounding":
+                    hybrid_gate["allow"] = False
                 if len(people) == 1:
                     jobs.append(run("dense_ext", author_search_ext, people[0],
                                     dense=True))
@@ -1041,6 +1333,9 @@ async def pre_retrieve(log, text, *, member_wiki=None, guild_id=None, message_id
                     if _ACTIVITY_QUESTION.search(text or ""):
                         jobs.append(run("person_activity", activity_part,
                                         people[0]))
+                    if _FIRST_ACTIVITY_QUESTION.search(text or ""):
+                        jobs.append(run("person_first_activity",
+                                        first_activity_part, people[0]))
                     jobs.extend(run(part, person_part, people[0], part)
                                 for part in ("overview", "server_wiki", "member_wiki"))
                 else:
@@ -1070,9 +1365,12 @@ async def pre_retrieve(log, text, *, member_wiki=None, guild_id=None, message_id
             people = await run("people", resolve_people, log.store, log.channel_ids,
                                text, log.caller_id, message_id, seed_person,
                                carryover_person, grounding_deadline) or []
-            if people:
+            if people and aux_gate_mode == "grounding":
                 hybrid_gate["allow"] = False
             jobs = [lexical]
+            jobs.append(run("books", books_part))
+            if claim_dispute:
+                jobs.append(run("claim_check", claim_part))
             if log.store._dense is not None:
                 if _prefetch_covers(prefetch_list, prefetch_subject, people):
                     # The prefetch already delivered this person's
@@ -1081,11 +1379,16 @@ async def pre_retrieve(log, text, *, member_wiki=None, guild_id=None, message_id
                     skipped.append("dense_prefetch")
                 else:
                     jobs.append(run("dense", dense_search, people, dense=True))
+            if reply_graph_enabled and log.store._dense is not None:
+                jobs.append(run("reply_graph", graph_part, dense=True))
             if len(people) == 1:
                 jobs.append(run("person_summary", summary_part, people[0]))
                 if _ACTIVITY_QUESTION.search(text or ""):
                     jobs.append(run("person_activity", activity_part,
                                     people[0]))
+                if _FIRST_ACTIVITY_QUESTION.search(text or ""):
+                    jobs.append(run("person_first_activity",
+                                    first_activity_part, people[0]))
                 jobs.extend(run(part, person_part, people[0], part)
                             for part in ("overview", "server_wiki", "member_wiki"))
             elif people:
@@ -1144,7 +1447,12 @@ async def pre_retrieve(log, text, *, member_wiki=None, guild_id=None, message_id
                             {"dense", "author"} & set(extended_routes)),
                         summary_retried=summary_state["retried"],
                     )
-                    if verdict["sufficient"] or not verdict["weak"]:
+                    claim_pending = (
+                        claim_dispute and not claim_state["retried"]
+                        and "claim_check" not in available
+                    )
+                    if (verdict["sufficient"] or not verdict["weak"]) \
+                            and not claim_pending:
                         break
                     remaining = started + hard_cap - perf_counter() - 0.1
                     if remaining <= 0.05:
@@ -1198,14 +1506,17 @@ async def pre_retrieve(log, text, *, member_wiki=None, guild_id=None, message_id
         # the whole 6,000 chars before the person's own evidence was
         # reached, so resolved questions still answered thin (A-5/A-6).
         selection_order = (
-            "person_summary", "person_activity", "appellations", "author",
-            "overview", "member_wiki", "server_wiki",
-            "ambiguity", "dense", "context", "prefetch", "lexical",
+            "claim_check", "person_summary", "person_activity",
+            "person_first_activity", "appellations", "author",
+            "overview", "member_wiki", "server_wiki", "books",
+            "ambiguity", "dense", "context", "reply_graph", "prefetch", "lexical",
         )
     else:
         selection_order = (
-            "dense", "context", "prefetch", "lexical", "ambiguity",
-            "person_summary", "person_activity", "appellations", "overview",
+            "claim_check", "dense", "context", "reply_graph", "books", "prefetch",
+            "lexical", "ambiguity",
+            "person_summary", "person_activity", "person_first_activity",
+            "appellations", "overview",
             "member_wiki", "server_wiki", "author",
         )
     for kind in selection_order:
@@ -1241,6 +1552,10 @@ async def pre_retrieve(log, text, *, member_wiki=None, guild_id=None, message_id
         "cache_lock_wait", "cache_sync", "dense", "lexical",
     )} | values
     result.diagnostics = {
+        # The calling turn's correlation id (None outside a turn,
+        # e.g. the CLI): lets this line be joined with the turn's
+        # Codex/Devin and Assistant completion lines in bot.log.
+        "turn_id": current_turn_id(),
         "elapsed_ms": round((perf_counter() - started) * 1000, 2), "status": status,
         "stages_ms": values, "active": active, "skipped": skipped,
         "errors": list(failures),
@@ -1261,9 +1576,23 @@ async def pre_retrieve(log, text, *, member_wiki=None, guild_id=None, message_id
         "summary_delivered": "person_summary" in counts,
         "activity_question": bool(_ACTIVITY_QUESTION.search(text or "")),
         "activity_delivered": "person_activity" in counts,
+        "first_activity_question": bool(
+            _FIRST_ACTIVITY_QUESTION.search(text or "")),
+        "first_activity_delivered": "person_first_activity" in counts,
+        "books_delivered": "books" in counts,
+        "claim_dispute": claim_dispute,
+        "claim_check_delivered": "claim_check" in counts,
+        "claim_author_hits": claim_author_hits,
         "person_unresolved": bool(
             not people and _PERSON_QUESTION.search(text or "")
         ),
+        "aux_gate_mode": aux_gate_mode,
+        "aux_gate_allowed": bool(hybrid_gate["allow"]),
+        "aux_fired": bool(aux_stats["fired"]),
+        "aux_hits": int(aux_stats["hits"]),
+        "reply_graph_seeds": int(reply_graph_stats["seeds"]),
+        "reply_graph_neighbors": int(reply_graph_stats["neighbors"]),
+        "reply_graph_delivered": "reply_graph" in counts,
     }
     logger.info("Automatic retrieval %s", json.dumps(result.diagnostics, sort_keys=True))
     if status == "cancelled":

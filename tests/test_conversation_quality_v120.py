@@ -145,7 +145,7 @@ def test_p2_appellation_question_delivers_the_whole_list(people_store):
     assert result.diagnostics["chunks"].get("appellations", 0) == 1
     assert "呼び名一覧" in str(result)
     assert "のの" in str(result)
-    assert "たま" in str(result)
+    assert "タヌキ" in str(result)
 
 
 def test_p2_unresolved_person_question_is_flagged_to_the_model(people_store):

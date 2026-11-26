@@ -9,7 +9,7 @@ import tempfile
 import time
 from collections import OrderedDict
 from contextlib import asynccontextmanager, contextmanager
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
@@ -27,6 +27,7 @@ from nezubot_discrod.prompts import (
 )
 from nezubot_discrod.sandbox import run_command, truncate_output
 from nezubot_discrod.server_log_tools import LOG_PARAMETERS, LOG_TOOLS
+from nezubot_discrod.turn_context import current_turn_id
 from nezubot_discrod.weather_tools import WEATHER_PARAMETERS, WEATHER_TOOLS
 from nezubot_discrod.web_guard import OutboundGuard
 from nezubot_discrod.web_tools import WEB_PARAMETERS, WEB_TOOLS, has_web_content
@@ -144,6 +145,60 @@ THREAD_MAX_AGE_SECONDS = 6 * 3600
 THREAD_MAX_IDLE_SECONDS = 90 * 60
 THREAD_REGISTRY_LIMIT = 256
 
+# Input budget for a reused thread (v1.23.0). A continuing thread
+# re-reads its whole context on every turn, so the previous turn's
+# input is the size the next turn starts from; when the estimate
+# (previous input + previous output + the new payload) crosses this
+# budget, the thread is retired before the turn and the turn
+# re-seeds a fresh thread from the assistant's compacted local
+# history — the same rollover the turn/age/idle caps already
+# perform, so no conversational state is managed twice.
+#
+# The value is set from the 2026-11-26 measurement (per-turn input
+# p50 14,538 / p95 70,280 / max 94,807 tokens): it sits far above
+# the median on purpose. A hard cap near 12k — the figure floated
+# in the GPT architecture review — would retire most threads and
+# throw away the 96–98% prompt-cache hit rate that thread reuse
+# exists for. The 40,000 budget instead cuts only
+# the accumulated tail (roughly the top decile of turns) while
+# ordinary threads, whose contexts run at the ~14.5k median, are
+# never touched. Override with CODEX_THREAD_INPUT_BUDGET_TOKENS;
+# 0 disables the budget gate (the turn/age/idle caps still apply).
+THREAD_INPUT_BUDGET_TOKENS = 40_000
+
+
+def _thread_input_budget_from_env():
+    raw = os.getenv("CODEX_THREAD_INPUT_BUDGET_TOKENS", "")
+    try:
+        value = int(raw)
+    except ValueError:
+        return THREAD_INPUT_BUDGET_TOKENS
+    return value if value >= 0 else THREAD_INPUT_BUDGET_TOKENS
+
+
+# Concurrent turns on the one persistent app-server (v1.25.0). The
+# 2026-11-26 probe proved the server
+# executes turns on different threads truly in parallel — two turns
+# at once took 53.5s against 96.7s sequentially — so the client now
+# admits up to this many turns at once instead of serializing every
+# turn on one lock. Turns that would share a thread still serialize
+# (the server rejects a second turn on a busy thread), and auth
+# operations keep their own exclusive lock. The default stays at 2:
+# the measured win is "a second simultaneous speaker no longer waits
+# for the first", and how the subscription rate limit answers higher
+# concurrency is still unmeasured. Override with
+# CODEX_MAX_CONCURRENT_TURNS.
+MAX_CONCURRENT_TURNS = 2
+
+
+def _max_concurrent_turns_from_env():
+    raw = os.getenv("CODEX_MAX_CONCURRENT_TURNS", "")
+    try:
+        value = int(raw)
+    except ValueError:
+        return MAX_CONCURRENT_TURNS
+    return value if value >= 1 else MAX_CONCURRENT_TURNS
+
 
 def _usage_delta(value, baseline):
     """Per-turn usage from a thread's cumulative token totals."""
@@ -160,6 +215,11 @@ class _ThreadEntry:
     last_used_at: float
     turns: int = 0
     totals: dict | None = None
+    # Per-turn usage of the most recent turn on this thread (deltas
+    # of `totals`): the input figure is the context size the next
+    # turn would start from, which is what the input budget gates on.
+    last_input_tokens: int | None = None
+    last_output_tokens: int | None = None
 
 
 def _thread_config(model, messages, *, wiki=None, server_log=None, web=None,
@@ -292,6 +352,48 @@ def app_server_arguments(binary: str) -> list[str]:
     return args
 
 
+# Per-turn notification queue bound: a turn that lets more than this
+# many routed messages pile up undrained fails with the limit error
+# the pre-demux buffered-events path used to raise.
+_TURN_QUEUE_LIMIT = 1000
+
+
+@dataclass
+class _TurnState:
+    """One in-flight turn's private state on a shared AppServer.
+
+    Until v1.23.0 the AppServer object itself held exactly one turn's
+    state (tool bindings, tool budget, outbound guard, usage), which
+    is what forced every turn through a single client-wide lock even
+    though the server executes threads in parallel. The state now
+    lives here, one instance per active turn, keyed by thread in
+    AppServer._turns. The bindings and the web_guard in particular
+    are a security boundary: a tool call is only ever handled with
+    the bindings of the turn its threadId names.
+    """
+
+    queue: asyncio.Queue = field(
+        default_factory=lambda: asyncio.Queue(maxsize=_TURN_QUEUE_LIMIT)
+    )
+    thread_id: str | None = None
+    tool_calls: int = 0
+    max_tool_calls: int = 20
+    wiki: object = None
+    server_log: object = None
+    web: object = None
+    weather: object = None
+    self_improve: object = None
+    tool_free: bool = False
+    private_read: bool = False
+    web_read: bool = False
+    web_guard: OutboundGuard = field(default_factory=OutboundGuard)
+    usage: dict | None = None
+    sources: list = field(default_factory=list)
+    thread_totals: dict | None = None
+    usage_baseline: dict = field(default_factory=dict)
+    error: BaseException | None = None
+
+
 class AppServer:
     def __init__(self, process, sandbox, runner=run_command, max_tool_calls=20,
                  run_command_enabled=True):
@@ -300,10 +402,16 @@ class AppServer:
         self.runner = runner
         self.run_command_enabled = run_command_enabled
         self.sequence = 0
-        self.events = []
-        self.tool_calls = 0
-        self.thread_id = None
         self.max_tool_calls = max_tool_calls
+        self.initialized = False
+        # Compatibility mirrors of the most recently completed turn.
+        # Concurrent turns keep their real state in _TurnState; these
+        # attributes serve the per-call path and diagnostics and must
+        # never be read to serve another turn.
+        self.thread_id = None
+        self.usage = None
+        self.sources = []
+        self.thread_totals = None
         self.wiki = None
         self.server_log = None
         self.web = None
@@ -313,53 +421,208 @@ class AppServer:
         self.private_read = False
         self.web_read = False
         self.web_guard = OutboundGuard()
-        self.usage = None
-        self.sources = []
-        self.initialized = False
-        self.thread_totals = None
-        self._usage_baseline = {}
+        # Demux plumbing: a single reader task owns stdout. Responses
+        # are matched to their callers by JSON-RPC id; notifications
+        # and server requests are routed to the owning turn's queue
+        # by threadId (see _route).
+        self._pending = {}
+        self._turns = {}
+        self._reader_task = None
+        self._closed_error = None
+        self._init_lock = asyncio.Lock()
+        # The reader only reads while somebody can consume what it
+        # reads — a pending request, or a registered turn. Otherwise
+        # it would race ahead of the conversation it serves and drop
+        # traffic whose owner has not registered yet (a real server
+        # never sends such traffic, but a scripted stream can, and
+        # pausing costs nothing when the connection is idle anyway).
+        self._interest = asyncio.Event()
 
     async def send(self, data):
         self.process.stdin.write((json.dumps(data) + "\n").encode())
         await self.process.stdin.drain()
 
-    async def receive(self):
-        line = await self.process.stdout.readline()
-        if not line:
-            raise CodexConnectionError("Codex app-server closed unexpectedly")
-        data = json.loads(line)
+    def _ensure_reader(self):
+        if self._reader_task is None:
+            self._reader_task = asyncio.ensure_future(self._read_loop())
+
+    async def _stop_reader(self):
+        task, self._reader_task = self._reader_task, None
+        if task is not None and not task.done():
+            task.cancel()
+            try:
+                await task
+            except BaseException:
+                pass
+
+    async def _read_loop(self):
+        error = None
+        try:
+            while True:
+                if not self._pending and not self._turns:
+                    self._interest.clear()
+                    if not self._pending and not self._turns:
+                        await self._interest.wait()
+                line = await self.process.stdout.readline()
+                if not line:
+                    raise CodexConnectionError(
+                        "Codex app-server closed unexpectedly")
+                self._dispatch(json.loads(line))
+                # Yield after every line: a caller whose request this
+                # line answers (or whose turn it belongs to) must get
+                # to run — registering its next request, or its turn
+                # state — before the following line is dispatched. A
+                # real pipe enforces this by making readline wait for
+                # data; an in-memory stream would otherwise let the
+                # reader race the whole conversation ahead of the
+                # turns it serves.
+                await asyncio.sleep(0)
+        except BaseException as exc:  # EOF, malformed JSON, cancellation
+            error = exc
+        finally:
+            if error is None or isinstance(error, asyncio.CancelledError):
+                error = CodexConnectionError(
+                    "Codex app-server closed unexpectedly")
+            self._closed_error = error
+            for future in self._pending.values():
+                if not future.done():
+                    future.set_exception(error)
+            self._pending.clear()
+            # The sentinel is queued behind whatever the server had
+            # already sent, so a turn drains its real traffic first
+            # and only then reports the disconnect.
+            for state in self._turns.values():
+                try:
+                    state.queue.put_nowait(("closed", error))
+                except asyncio.QueueFull:
+                    if state.error is None:
+                        state.error = error
+
+    def _route(self, data):
+        """The turn state a server message belongs to, or None.
+
+        Exact routing is by params.threadId. A message carrying no
+        threadId at all falls back to the sole active turn when there
+        is exactly one — the real server always tags its traffic, so
+        in production the fallback never reroutes anything; it keeps
+        single-turn drivers (and the scripted test fakes, whose
+        notifications predate the tagging) working unchanged. A
+        message naming an unknown thread is never rerouted.
+        """
+        params = data.get("params") or {}
+        thread_id = params.get("threadId")
+        if thread_id is not None:
+            return self._turns.get(thread_id)
+        if len(self._turns) == 1:
+            return next(iter(self._turns.values()))
+        return None
+
+    def _enqueue(self, state, item):
+        try:
+            state.queue.put_nowait(item)
+        except asyncio.QueueFull:
+            if state.error is None:
+                state.error = RuntimeError("Codex notification limit exceeded")
+
+    def _dispatch(self, data):
         if "method" in data and "id" in data:
-            await self.handle_request(data)
-            return None
+            # A server-initiated request (a dynamic tool call, or a
+            # host-action approval this client always refuses).
+            state = self._route(data)
+            if state is not None:
+                self._enqueue(state, ("request", data))
+            elif data["method"] == "item/tool/call":
+                asyncio.ensure_future(self._refuse_tool_call(data))
+            else:
+                asyncio.ensure_future(self._deny_unowned_request(data))
+            return
+        if "id" in data:
+            future = self._pending.pop(data["id"], None)
+            if future is not None and not future.done():
+                future.set_result(data)
+            return
+        if "method" in data:
+            state = self._route(data)
+            if state is not None:
+                self._enqueue(state, ("notification", data))
+
+    async def _deny_unowned_request(self, data):
+        """Answer a server request no live turn owns, without touching
+        any turn's state: approvals are refused with their decision,
+        everything else gets the method-not-allowed error. Unlike the
+        owned path this never raises — there is no turn to fail."""
+        method = data["method"]
+        logger.warning("Denying Codex request with no owning turn: %s", method)
+        try:
+            if method in {"execCommandApproval", "applyPatchApproval"}:
+                await self.send({"id": data["id"], "result": {"decision": "abort"}})
+            elif method in {
+                "item/commandExecution/requestApproval",
+                "item/fileChange/requestApproval",
+            }:
+                await self.send({"id": data["id"], "result": {"decision": "cancel"}})
+            else:
+                await self.send(
+                    {
+                        "id": data["id"],
+                        "error": {
+                            "code": -32601,
+                            "message": "Denied: only registered dynamic tools are allowed",
+                        },
+                    }
+                )
+        except (OSError, RuntimeError):
+            pass
+
+    async def _refuse_tool_call(self, data):
+        """A dynamic tool call naming a thread with no live turn:
+        answer it as a failed tool result — never executed, and no
+        turn's bindings or guard are touched — exactly as the owning
+        turn's own scope check answers an out-of-scope call."""
+        logger.warning(
+            "Refusing Codex tool call for unknown thread: %s",
+            (data.get("params") or {}).get("tool"),
+        )
+        try:
+            await self.send(
+                {
+                    "id": data["id"],
+                    "result": {
+                        "success": False,
+                        "contentItems": [
+                            {
+                                "type": "inputText",
+                                "text": "Tool error: unknown tool or invalid arguments.",
+                            }
+                        ],
+                    },
+                }
+            )
+        except (OSError, RuntimeError):
+            pass
+
+    async def request(self, method, params):
+        self._ensure_reader()
+        if self._closed_error is not None:
+            raise self._closed_error
+        self.sequence += 1
+        request_id = self.sequence
+        future = asyncio.get_running_loop().create_future()
+        self._pending[request_id] = future
+        self._interest.set()
+        try:
+            await self.send({"id": request_id, "method": method, "params": params})
+            data = await future
+        finally:
+            self._pending.pop(request_id, None)
         if "error" in data:
             if _rate_limited(data["error"]):
                 raise CodexRateLimited("Codex rate limited")
             raise RuntimeError("Codex app-server returned an error")
-        if data.get("method") in {"item/started", "item/completed"}:
-            kind = data.get("params", {}).get("item", {}).get("type")
-            if self.tool_free and kind == "dynamicToolCall":
-                raise CodexSecurityError("Tool-free Codex turn cannot call tools")
-            if kind not in PASSIVE_ITEM_TYPES | {"dynamicToolCall"}:
-                raise CodexSecurityError("Unexpected built-in tool item; stopping Codex")
-        return data
+        return data["result"]
 
-    async def request(self, method, params):
-        self.sequence += 1
-        request_id = self.sequence
-        await self.send({"id": request_id, "method": method, "params": params})
-        while True:
-            data = await self.receive()
-            if data is None:
-                continue
-            if data.get("id") == request_id:
-                return data["result"]
-            if "method" in data:
-                if len(self.events) >= 1000:
-                    raise RuntimeError("Codex notification limit exceeded")
-                self.events.append(data)
-
-    async def handle_request(self, data):
-        if self.tool_free:
+    async def _handle_request(self, state, data):
+        if state.tool_free:
             raise CodexSecurityError(
                 "Tool-free Codex turn cannot call tools or request host actions"
             )
@@ -387,8 +650,8 @@ class AppServer:
             raise CodexSecurityError("Denied Codex host execution or file change approval")
         params = data.get("params", {})
         args = params.get("arguments")
-        self.tool_calls += 1
-        if self.tool_calls > self.max_tool_calls:
+        state.tool_calls += 1
+        if state.tool_calls > state.max_tool_calls:
             # Budget exhausted: answer the call with an error result
             # instead of failing the whole turn, so the model can wrap
             # up with what it has already gathered.
@@ -402,7 +665,7 @@ class AppServer:
                                 "type": "inputText",
                                 "text": (
                                     "Tool error: the tool-call budget for "
-                                    f"this turn is exhausted ({self.max_tool_calls} "
+                                    f"this turn is exhausted ({state.max_tool_calls} "
                                     "calls). Stop calling tools and answer "
                                     "now with what you have already gathered."
                                 ),
@@ -414,16 +677,16 @@ class AppServer:
             return
         name = params.get("tool")
         scoped = (
-            self.thread_id is not None
-            and params.get("threadId") == self.thread_id
+            state.thread_id is not None
+            and params.get("threadId") == state.thread_id
             and not params.get("namespace")
             and isinstance(name, str)
         )
         valid = False
         text = (
             "Tool error: only run_command with a nonempty command string is allowed."
-            if self.wiki is None and self.server_log is None and self.web is None
-            and self.weather is None
+            if state.wiki is None and state.server_log is None and state.web is None
+            and state.weather is None
             else "Tool error: unknown tool or invalid arguments."
         )
         tool_started = time.monotonic()
@@ -439,13 +702,13 @@ class AppServer:
         ):
             text = await asyncio.to_thread(self.runner, args["command"], self.sandbox)
             valid = True
-        elif scoped and self.self_improve is not None and name == "request_self_improvement":
+        elif scoped and state.self_improve is not None and name == "request_self_improvement":
             try:
-                text = await request_improvement(self.self_improve, args)
+                text = await request_improvement(state.self_improve, args)
                 valid = True
             except (ValueError, TypeError) as error:
                 text = f"Tool error: {error}"
-        elif scoped and self.web is not None and name in WEB_PARAMETERS:
+        elif scoped and state.web is not None and name in WEB_PARAMETERS:
             try:
                 # Outbound payload inspection replaces the old per-turn
                 # taint disable: a web call is blocked only when its
@@ -453,48 +716,48 @@ class AppServer:
                 # read (see nezubot_discrod.web_guard). Clean follow-up
                 # calls — opening search results, paging, comparing
                 # sources — stay available all turn.
-                blocked = self.web_guard.check_call(name, args)
+                blocked = state.web_guard.check_call(name, args)
                 if blocked is not None:
                     text = blocked
                 else:
-                    text = await asyncio.to_thread(self.web.call, name, args)
-                    self.web_read = self.web_read or has_web_content(text)
+                    text = await asyncio.to_thread(state.web.call, name, args)
+                    state.web_read = state.web_read or has_web_content(text)
                     valid = True
             except (ValueError, TypeError) as error:
                 text = f"Tool error: {error}"
-        elif scoped and self.weather is not None and name in WEATHER_PARAMETERS:
+        elif scoped and state.weather is not None and name in WEATHER_PARAMETERS:
             # Weather/clock tools hit fixed public APIs with structured
             # arguments and results; they are not web content and do not
             # take part in the web guard accounting above.
             try:
-                text = await asyncio.to_thread(self.weather.call, name, args)
+                text = await asyncio.to_thread(state.weather.call, name, args)
                 valid = True
             except (ValueError, TypeError) as error:
                 text = f"Tool error: {error}"
-        elif scoped and self.server_log is not None and name in LOG_PARAMETERS:
-            self.private_read = True
+        elif scoped and state.server_log is not None and name in LOG_PARAMETERS:
+            state.private_read = True
             try:
-                text = await asyncio.to_thread(self.server_log.call, name, args)
+                text = await asyncio.to_thread(state.server_log.call, name, args)
                 valid = True
             except (ValueError, TypeError) as error:
                 text = f"Tool error: {error}"
-            self.web_guard.note_private(text)
-        elif scoped and self.wiki is not None and name in TOOL_PARAMETERS:
-            self.private_read = True
+            state.web_guard.note_private(text)
+        elif scoped and state.wiki is not None and name in TOOL_PARAMETERS:
+            state.private_read = True
             try:
-                text = await asyncio.to_thread(self.wiki.call, name, args)
+                text = await asyncio.to_thread(state.wiki.call, name, args)
                 valid = True
             except WikiError as error:
                 text = f"Tool error: {error}"
-            self.web_guard.note_private(text)
+            state.web_guard.note_private(text)
         tool_elapsed = time.monotonic() - tool_started
         if tool_elapsed >= 3:
             logger.info(
                 "Slow tool call: %s took %.1fs", name, tool_elapsed,
             )
         if valid:
-            self.sources = collect_tool_sources(self.sources, name, text)
-        if valid and self.tool_calls == self.max_tool_calls - 5:
+            state.sources = collect_tool_sources(state.sources, name, text)
+        if valid and state.tool_calls == state.max_tool_calls - 5:
             text += (
                 "\n(Tool budget note: 5 tool calls left in this turn; "
                 "start wrapping up.)"
@@ -529,8 +792,9 @@ class AppServer:
         self.initialized = True
 
     async def ensure_initialized(self, *, refresh_token=False):
-        if not self.initialized:
-            await self.initialize(refresh_token=refresh_token)
+        async with self._init_lock:
+            if not self.initialized:
+                await self.initialize(refresh_token=refresh_token)
 
     async def complete(
         self, model, messages, cwd, *, wiki=None, server_log=None, web=None,
@@ -543,6 +807,7 @@ class AppServer:
         input_text=None,
         usage_baseline=None,
         scope=None,
+        result_box=None,
     ):
         # `scope` is accepted (and ignored here) so adapters that forward
         # the client's completion arguments verbatim keep working; thread
@@ -555,35 +820,27 @@ class AppServer:
             run_command_enabled=self.run_command_enabled,
         )
         turn_started = time.monotonic()
-        self.tool_free = config.tool_free
-        self.self_improve = config.self_improve
-        self.private_read = private_read
-        self.web_read = False
+        state = _TurnState(max_tool_calls=self.max_tool_calls)
+        state.tool_free = config.tool_free
+        state.self_improve = config.self_improve
+        state.private_read = private_read
         # Fresh outbound-payload guard for this turn, seeded from the
         # conversation being sent: each user message is a turn payload
         # whose non-"message" fields are injected private context
         # (retrieved excerpts, wiki context, recent messages), while
         # the "message" fields are the users' own words and exempt.
-        self.web_guard = OutboundGuard()
         for message in messages or []:
             if isinstance(message, dict) and message.get("role") == "user":
-                self.web_guard.seed_from_user_payload(message.get("content"))
+                state.web_guard.seed_from_user_payload(message.get("content"))
         if input_text is not None:
-            self.web_guard.seed_from_user_payload(input_text)
-        # Per-turn state reset: a persistent server runs many turns on
-        # this one object, and nothing from a previous turn (buffered
-        # notifications, tool budget, usage, sources) may leak into the
-        # next one.
-        self.events.clear()
-        self.tool_calls = 0
-        self.usage = None
-        self.sources = []
-        self.thread_totals = None
-        self._usage_baseline = usage_baseline or {}
-        self.wiki = wiki
-        self.server_log = server_log
-        self.web = web
-        self.weather = weather
+            state.web_guard.seed_from_user_payload(input_text)
+        state.usage_baseline = usage_baseline or {}
+        state.wiki = wiki
+        state.server_log = server_log
+        state.web = web
+        state.weather = weather
+        self._ensure_reader()
+        registered = False
         try:
             await self.ensure_initialized()
             if thread_id is None:
@@ -611,15 +868,29 @@ class AppServer:
                     or thread.get("sandbox", {}).get("networkAccess", False)
                 ):
                     raise CodexSecurityError("Codex did not apply the requested security policy")
-                self.thread_id = thread["thread"]["id"]
+                state.thread_id = thread["thread"]["id"]
             else:
                 # Reused thread: its policy was verified when it was
                 # created under the same config hash.
-                self.thread_id = thread_id
+                state.thread_id = thread_id
+            if state.thread_id in self._turns:
+                # The server rejects a second turn on a thread that
+                # already has one ("The thread already has an active
+                # turn."); refuse here, before turn/start, so the
+                # caller gets a clean client-side error instead. The
+                # client's per-thread locks make this unreachable on
+                # the persistent path — this is the second layer.
+                raise RuntimeError(
+                    "Codex thread already has an active turn; "
+                    "concurrent turns on one thread are not supported"
+                )
+            self._turns[state.thread_id] = state
+            registered = True
+            self._interest.set()
             await self.request(
                 "turn/start",
                 {
-                    "threadId": self.thread_id,
+                    "threadId": state.thread_id,
                     "input": [{
                         "type": "text",
                         "text": (
@@ -627,20 +898,31 @@ class AppServer:
                             else json.dumps(messages, ensure_ascii=False)
                         ),
                     }],
-                    **({"effort": "low"} if self.tool_free else {}),
+                    **({"effort": "low"} if state.tool_free else {}),
                 },
             )
             answer = ""
             while True:
-                data = self.events.pop(0) if self.events else await self.receive()
-                if data is None:
+                kind, data = await state.queue.get()
+                if state.error is not None:
+                    raise state.error
+                if kind == "closed":
+                    raise data
+                if kind == "request":
+                    await self._handle_request(state, data)
                     continue
                 params = data.get("params", {})
+                if data.get("method") in {"item/started", "item/completed"}:
+                    item_kind = params.get("item", {}).get("type")
+                    if state.tool_free and item_kind == "dynamicToolCall":
+                        raise CodexSecurityError("Tool-free Codex turn cannot call tools")
+                    if item_kind not in PASSIVE_ITEM_TYPES | {"dynamicToolCall"}:
+                        raise CodexSecurityError("Unexpected built-in tool item; stopping Codex")
                 if (data.get("method") == "thread/tokenUsage/updated"
-                        and params.get("threadId") == self.thread_id):
+                        and params.get("threadId") == state.thread_id):
                     total = params.get("tokenUsage", {}).get("total", {})
-                    self.thread_totals = total
-                    base = self._usage_baseline
+                    state.thread_totals = total
+                    base = state.usage_baseline
                     counts = token_usage({
                         "prompt_tokens": _usage_delta(
                             total.get("inputTokens"), base.get("inputTokens")),
@@ -648,7 +930,7 @@ class AppServer:
                             total.get("outputTokens"), base.get("outputTokens")),
                     })
                     if counts is not None:
-                        self.usage = {
+                        state.usage = {
                             "prompt_tokens": counts[0],
                             "completion_tokens": counts[1],
                         }
@@ -658,7 +940,7 @@ class AppServer:
                             # Prompt-cache observability: how much of this
                             # turn's input the backend served from its
                             # prefix cache (delta of the thread totals).
-                            self.usage["cached_input_tokens"] = cached
+                            state.usage["cached_input_tokens"] = cached
                 if data.get("method") == "item/completed":
                     item = params["item"]
                     if item.get("type") == "agentMessage":
@@ -670,24 +952,45 @@ class AppServer:
                         raise CodexRateLimited("Codex rate limited")
                     if turn.get("status") != "completed":
                         raise RuntimeError("Codex turn failed or was interrupted")
-                    usage = self.usage or {}
+                    usage = state.usage or {}
                     logger.info(
-                        "Codex turn finished in %.1fs (tool_calls=%d, "
-                        "input=%s, cached=%s, output=%s)",
-                        time.monotonic() - turn_started, self.tool_calls,
+                        "Codex turn finished in %.1fs (turn_id=%s, "
+                        "tool_calls=%d, input=%s, cached=%s, output=%s)",
+                        time.monotonic() - turn_started, current_turn_id(),
+                        state.tool_calls,
                         usage.get("prompt_tokens"),
                         usage.get("cached_input_tokens"),
                         usage.get("completion_tokens"),
                     )
                     return answer
         finally:
-            # Never leave the previous turn's tool bindings live on a
-            # persistent server between turns.
-            self.wiki = None
-            self.server_log = None
-            self.web = None
-            self.weather = None
-            self.self_improve = None
+            if registered:
+                # Remove only this turn's own registration: a refused
+                # double-turn attempt (which never registers) must
+                # not evict the turn legitimately running on the
+                # thread, and neither may a late finally from an
+                # earlier turn on a reused thread.
+                if self._turns.get(state.thread_id) is state:
+                    del self._turns[state.thread_id]
+                # Compatibility mirrors: the most recent turn's outcome
+                # stays readable on the server object, as the per-call
+                # path and older callers expect. Concurrent turns never
+                # read these; their results travel via result_box.
+                self.thread_id = state.thread_id
+                self.usage = state.usage
+                self.sources = state.sources
+                self.thread_totals = state.thread_totals
+                self.private_read = state.private_read
+                self.web_read = state.web_read
+                if result_box is not None:
+                    result_box.update(
+                        {
+                            "thread_id": state.thread_id,
+                            "usage": state.usage,
+                            "sources": state.sources,
+                            "thread_totals": state.thread_totals,
+                        }
+                    )
 
 
 class CodexClient:
@@ -698,20 +1001,75 @@ class CodexClient:
         self.run_command_enabled = run_command_enabled
         self.chat = SimpleNamespace(completions=self)
         self.lock = asyncio.Lock()
+        # Admission control for turns (v1.25.0): create() no longer
+        # serializes on self.lock — it takes one of this many turn
+        # slots instead, and turns proceed in parallel on the shared
+        # app-server. self.lock remains as the exclusive lock for the
+        # auth-adjacent operations (rate_limits, warm_server_wiki_auth,
+        # close), exactly as before.
+        self.max_concurrent_turns = _max_concurrent_turns_from_env()
+        self._turn_slots = asyncio.Semaphore(self.max_concurrent_turns)
+        # Turns currently queued for a turn slot (excluding holders):
+        # reported with each turn's lock wait so the admission cost
+        # stays as visible as the serialization cost was.
+        self._lock_waiters = 0
+        # Serializes persistent-server startup and teardown, so two
+        # concurrent turns cannot spawn it (or drop it) twice.
+        self._server_lock = asyncio.Lock()
+        # One lock per persistent-thread registry key: two turns that
+        # would land on the same thread serialize on it, while turns
+        # for different scopes run in parallel. Entries are dropped
+        # opportunistically by forget_threads; the map stays bounded
+        # by the distinct (scope, config) pairs actually seen.
+        self._thread_locks = {}
+        self.thread_input_budget = _thread_input_budget_from_env()
         self.runtime = None
         self.max_tool_calls = max_tool_calls
         self._version_key = None
         self._catalog_key = None
         self._catalog_models = None
         # Plan A: one persistent app-server plus a registry of reusable
-        # per-scope threads. Turns stay
-        # serialized on self.lock, exactly as the per-call path always
-        # was, so a single connection never interleaves two turns.
+        # per-scope threads. Since
+        # v1.25.0 the turns on it run concurrently (up to the turn
+        # slots); only turns sharing one thread still serialize, on
+        # that thread's key lock.
         self._persistent = None
         self._persistent_ctx = None
         self._persistent_work = None
         self._persistent_failures = 0
         self._threads = OrderedDict()
+
+    @asynccontextmanager
+    async def _turn_lock(self):
+        """A turn slot, with the acquisition wait measured and logged.
+
+        Until v1.23.0 this wrapped the client's single lock and every
+        turn waited for the previous one to finish. The wait line
+        ("Codex client lock wait") is kept verbatim so the cost stays
+        comparable across versions — it now measures the wait for one
+        of the concurrency slots (MAX_CONCURRENT_TURNS), which is
+        ~0ms unless that many turns are already running. One line per
+        create() call: the wait in ms, the turn's correlation id, and
+        how many turns were still queued behind this one when it got
+        its slot.
+        """
+        wait_started = time.monotonic()
+        self._lock_waiters += 1
+        try:
+            await self._turn_slots.acquire()
+        except BaseException:
+            self._lock_waiters -= 1
+            raise
+        self._lock_waiters -= 1
+        logger.info(
+            "Codex client lock wait %.1fms (turn_id=%s, waiters=%d)",
+            (time.monotonic() - wait_started) * 1000,
+            current_turn_id(), self._lock_waiters,
+        )
+        try:
+            yield
+        finally:
+            self._turn_slots.release()
 
     async def close(self):
         async with self.lock:
@@ -726,6 +1084,9 @@ class CodexClient:
         wanted = set(scopes)
         for key in [key for key in self._threads if key[0] in wanted]:
             del self._threads[key]
+        for key in [key for key in self._thread_locks if key[0] in wanted]:
+            if not self._thread_locks[key].locked():
+                del self._thread_locks[key]
 
     def catalog_slugs(self):
         """Slugs of the most recently parsed Codex catalog, or None
@@ -816,7 +1177,6 @@ class CodexClient:
         """
         async with self.lock:
             if self._persistent is not None and self._persistent.process.returncode is None:
-                self._persistent.tool_free = True
                 try:
                     return await self._persistent.request("account/rateLimits/read", {})
                 except (CodexConnectionError, OSError):
@@ -826,7 +1186,6 @@ class CodexClient:
             with self._workspace(root) as (cwd, env):
                 await self._verify_version(env)
                 async with self.server(cwd, env) as server:
-                    server.tool_free = True
                     await server.initialize(refresh_token=_auth_needs_refresh(auth))
                     return await server.request("account/rateLimits/read", {})
 
@@ -838,7 +1197,6 @@ class CodexClient:
                 with self._workspace(root) as (cwd, env):
                     await self._verify_version(env)
                     async with self.server(cwd, env) as server:
-                        server.tool_free = True
                         await server.initialize(refresh_token=True)
                 if _auth_needs_refresh(auth):
                     raise RuntimeError("Codex auth refresh did not produce fresh credentials")
@@ -858,11 +1216,12 @@ class CodexClient:
             stderr=asyncio.subprocess.DEVNULL,
             limit=1024 * 1024,
         )
+        server = AppServer(
+            process, self.settings.sandbox, self.runner, self.max_tool_calls,
+            run_command_enabled=self.run_command_enabled,
+        )
         try:
-            yield AppServer(
-                process, self.settings.sandbox, self.runner, self.max_tool_calls,
-                run_command_enabled=self.run_command_enabled,
-            )
+            yield server
         finally:
             if process.returncode is None:
                 process.terminate()
@@ -871,8 +1230,13 @@ class CodexClient:
                 except TimeoutError:
                     process.kill()
                     await process.wait()
+            await server._stop_reader()
 
     async def _drop_persistent_server(self, reason, *, warn=True):
+        async with self._server_lock:
+            await self._drop_persistent_server_locked(reason, warn=warn)
+
+    async def _drop_persistent_server_locked(self, reason, *, warn=True):
         ctx, self._persistent_ctx = self._persistent_ctx, None
         self._persistent = None
         self._persistent_work = None
@@ -893,7 +1257,15 @@ class CodexClient:
         after death. Threads do not survive it: the registry is cleared
         whenever a fresh process comes up, so the next turn for each
         scope re-seeds a new thread from the assistant's local history.
+
+        Startup and teardown are serialized on self._server_lock:
+        with turns running concurrently, two of them must not spawn
+        (or drop) the shared process at the same time.
         """
+        async with self._server_lock:
+            return await self._ensure_persistent_server_locked(model)
+
+    async def _ensure_persistent_server_locked(self, model):
         if self._persistent is not None:
             if self._persistent.process.returncode is None:
                 return self._persistent
@@ -901,7 +1273,7 @@ class CodexClient:
                 "Persistent Codex app-server exited (code %s); restarting",
                 self._persistent.process.returncode,
             )
-            await self._drop_persistent_server("process exited")
+            await self._drop_persistent_server_locked("process exited")
         root = self.prepare_runtime()
         work = root / "work-persistent"
         work.mkdir(exist_ok=True)
@@ -943,11 +1315,29 @@ class CodexClient:
             return None
         return entry
 
+    def _estimated_next_input(self, entry, last_message):
+        """Estimated input tokens if `entry`'s thread took one more
+        turn, or None when the budget gate does not apply (budget
+        disabled, or the thread has no measured turn yet)."""
+        if self.thread_input_budget <= 0 or entry.last_input_tokens is None:
+            return None
+        payload = json.dumps([last_message], ensure_ascii=False)
+        # Character count as the new payload's token estimate:
+        # Japanese text tokenizes at roughly a token per character,
+        # so this errs on the safe (early-retire) side. The previous
+        # turn's output is included because it joined the thread's
+        # context after that turn's input was measured.
+        return (
+            entry.last_input_tokens
+            + (entry.last_output_tokens or 0)
+            + len(payload)
+        )
+
     @staticmethod
-    def _response(text, server):
+    def _response(text, usage, sources):
         return SimpleNamespace(
-            usage=server.usage,
-            sources=tuple(server.sources),
+            usage=usage,
+            sources=tuple(sources or ()),
             choices=[
                 SimpleNamespace(
                     message=SimpleNamespace(
@@ -970,50 +1360,85 @@ class CodexClient:
             run_command_enabled=self.run_command_enabled,
         )
         server = await self._ensure_persistent_server(model)
-        now = time.monotonic()
         key = (scope, config.config_hash)
-        entry = self._thread_entry(key, now)
-        if entry is not None:
-            # The thread already holds the conversation; send only the
-            # newest user message, in the same JSON envelope shape the
-            # first turn used, so the request stays a strict extension
-            # of the cached prefix.
-            input_text = json.dumps([messages[-1]], ensure_ascii=False)
-            thread_id = entry.thread_id
-            baseline = entry.totals
-        else:
-            input_text = None
-            thread_id = None
-            baseline = None
-        text = await server.complete(
-            model,
-            messages,
-            str(self._persistent_work),
-            wiki=wiki,
-            **({"server_log": server_log} if server_log is not None else {}),
-            **({"web": web} if web is not None else {}),
-            **({"weather": weather} if weather is not None else {}),
-            **({"ambient": True} if ambient else {}),
-            **({"private_read": True} if private_read else {}),
-            **({"self_improve": self_improve} if self_improve is not None else {}),
-            thread_id=thread_id,
-            input_text=input_text,
-            usage_baseline=baseline,
-        )
-        now = time.monotonic()
-        if entry is None:
-            entry = _ThreadEntry(
-                thread_id=server.thread_id, created_at=now, last_used_at=now,
+        # Turns for the same registry key would land on the same
+        # thread, and the server rejects a second concurrent turn on
+        # one thread — so this section (registry lookup, the turn
+        # itself, the registry update) runs under the key's own lock.
+        # Different keys proceed in parallel up to the turn-slot
+        # limit, which is the concurrency this refactor exists for.
+        key_lock = self._thread_locks.setdefault(key, asyncio.Lock())
+        async with key_lock:
+            now = time.monotonic()
+            entry = self._thread_entry(key, now)
+            if entry is not None:
+                estimate = self._estimated_next_input(entry, messages[-1])
+                if estimate is not None and estimate > self.thread_input_budget:
+                    # Retire the thread before this turn: it re-seeds
+                    # below from the full local history, exactly like a
+                    # turn-cap rollover. The fresh thread's actual input
+                    # lands in this turn's "Codex turn finished" line
+                    # under the same turn_id, so before/after sizes can
+                    # be compared from the log.
+                    logger.info(
+                        "Codex thread retired by input budget (turn_id=%s, "
+                        "estimated_input=%d, budget=%d, last_input=%s, "
+                        "thread_turns=%d)",
+                        current_turn_id(), estimate, self.thread_input_budget,
+                        entry.last_input_tokens, entry.turns,
+                    )
+                    del self._threads[key]
+                    entry = None
+            if entry is not None:
+                # The thread already holds the conversation; send only the
+                # newest user message, in the same JSON envelope shape the
+                # first turn used, so the request stays a strict extension
+                # of the cached prefix.
+                input_text = json.dumps([messages[-1]], ensure_ascii=False)
+                thread_id = entry.thread_id
+                baseline = entry.totals
+            else:
+                input_text = None
+                thread_id = None
+                baseline = None
+            result_box = {}
+            text = await server.complete(
+                model,
+                messages,
+                str(self._persistent_work),
+                wiki=wiki,
+                **({"server_log": server_log} if server_log is not None else {}),
+                **({"web": web} if web is not None else {}),
+                **({"weather": weather} if weather is not None else {}),
+                **({"ambient": True} if ambient else {}),
+                **({"private_read": True} if private_read else {}),
+                **({"self_improve": self_improve} if self_improve is not None else {}),
+                thread_id=thread_id,
+                input_text=input_text,
+                usage_baseline=baseline,
+                result_box=result_box,
             )
-            self._threads[key] = entry
-            while len(self._threads) > THREAD_REGISTRY_LIMIT:
-                self._threads.popitem(last=False)
-        entry.turns += 1
-        entry.last_used_at = now
-        entry.totals = server.thread_totals
-        self._threads.move_to_end(key)
-        self._persistent_failures = 0
-        return self._response(text, server)
+            now = time.monotonic()
+            if entry is None:
+                entry = _ThreadEntry(
+                    thread_id=result_box["thread_id"],
+                    created_at=now, last_used_at=now,
+                )
+                self._threads[key] = entry
+                while len(self._threads) > THREAD_REGISTRY_LIMIT:
+                    self._threads.popitem(last=False)
+            entry.turns += 1
+            entry.last_used_at = now
+            entry.totals = result_box["thread_totals"]
+            usage = result_box["usage"] or {}
+            if type(usage.get("prompt_tokens")) is int:
+                entry.last_input_tokens = usage["prompt_tokens"]
+            if type(usage.get("completion_tokens")) is int:
+                entry.last_output_tokens = usage["completion_tokens"]
+            self._threads.move_to_end(key)
+            self._persistent_failures = 0
+            return self._response(
+                text, result_box["usage"], result_box["sources"])
 
     async def direct_catalog(self, root, cwd, env, model):
         catalog = root / "direct-models.json"
@@ -1064,7 +1489,7 @@ class CodexClient:
         arbiter=False, server_wiki=False, private_read=False, self_improve=None, scope=None,
         **kwargs
     ):
-        async with self.lock, asyncio.timeout(600):
+        async with self._turn_lock(), asyncio.timeout(600):
             if self._persistent_eligible(scope, messages, arbiter=arbiter, server_wiki=server_wiki):
                 try:
                     return await self._create_persistent(
@@ -1125,6 +1550,7 @@ class CodexClient:
             await self._verify_version(env)
             catalog = await self.direct_catalog(root, cwd, env, model)
             async with self.server(cwd, env, catalog) as server:
+                result_box = {}
                 text = await server.complete(
                     model,
                     messages,
@@ -1138,5 +1564,6 @@ class CodexClient:
                     **({"server_wiki": True} if server_wiki else {}),
                     **({"private_read": True} if private_read else {}),
                     **({"self_improve": self_improve} if self_improve is not None else {}),
+                    result_box=result_box,
                 )
-        return self._response(text, server)
+        return self._response(text, result_box["usage"], result_box["sources"])

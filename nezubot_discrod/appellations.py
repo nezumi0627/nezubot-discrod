@@ -19,6 +19,15 @@ a name. Results live in their own tables (appellations,
 appellation_state) alongside the archive; the archive tables are
 only read.
 
+Bot-authored messages are never mined as callers: a bot's output is
+boilerplate, not evidence of how a person is addressed — the bot's
+own error notice (「返事を作る途中で…」) replied to the owner sixteen
+times and made 「返事」 his "most-used appellation". Candidates must
+also be name-shaped (kana/kanji/word characters only) and not a
+known sentence-opener or context word: the leading-vocative scan
+otherwise harvests whatever a reply happens to start with
+(「普通に…」 → 普通, 「こんにちは」 → こん, 「ちなみに」 → ちなみ).
+
 The miner runs in snowflake-id order and remembers a watermark, so
 the first pass mines the whole archive and later passes (the embed
 worker's) only process new messages.
@@ -118,15 +127,59 @@ _STOPWORDS = {
     "おい", "ねえ", "あの", "この", "その", "どの", "えっと", "あと",
     "それで", "だから", "でも", "けど", "ので", "から", "では",
     "じゃあ", "先生", "先輩", "氏", "さん", "ちゃん", "くん",
+    # Sentence openers, greetings and context words the leading scan
+    # harvests from ordinary replies (measured on the production
+    # graph, 2026-11-25: each of these was mined as the "name" of
+    # dozens of different people). Clipped fragments of longer
+    # openers (こん←こんにちは, さす←さすが, ちょっ←ちょっと) are
+    # here too: the scan cuts at the first particle-like character.
+    "こん", "こんにち", "こんばん", "やあ", "普通", "ちなみ", "確か",
+    "たしか", "まず", "最近", "最初", "基本", "結論", "本当", "流石",
+    "さすが", "さす", "なるほど", "そんな", "そんなこ", "どゆこ",
+    "どうや", "何言", "あり", "はい", "いいえ", "ごめん", "了解",
+    "大丈夫", "まじ", "どこ", "ほん", "たく", "ちょっ", "なん",
+    "うーん", "あー", "わぁ", "はぁ", "えっ", "うわ", "くさ", "そーな",
+    "だよね", "まあ", "できる", "分かる", "読んだ", "書いた", "調べた",
+    "呼んだ", "人間", "名前", "画像", "日本", "日本人", "返事", "回答",
+    "ごめんなさい",
+    "使用量", "記憶", "検索", "更新", "具体的", "無理", "雑談", "絵文字",
+    "バイト", "彼ら", "んね", "理屈", "公開", "公式", "受験生", "終わ",
+    "めいく",
 }
 
 # Message-format and tech artifacts that lead replies to bots and
 # code helpers ("[file]", "https", "error", …) are not names.
+# Product and tool names people talk ABOUT in replies to a person
+# (vyline, discord, claude…) belong here too: they are topics, and
+# the production graph had each of them as dozens of people's "name".
 _TECH_STOPWORDS = {
     "https", "http", "www", "error", "errors", "ai", "id", "chat",
     "api", "url", "null", "true", "false", "json", "file", "image",
     "video", "audio", "sticker", "code", "www2",
+    "discord", "claude", "vyline", "line", "linejs", "opencode",
+    "android", "pixel", "mac", "gpt", "ifconfig", "make", "zip",
+    "state", "nda", "メッセージ", "完了",
 }
+
+# A name consists of name characters only: kana, kanji, the long-vowel
+# mark and middle dot, ASCII word characters. Anything carrying
+# punctuation, symbols, emoji or markup ("??", "```", "**nda",
+# "「全部", "~~だ") is a message fragment, whatever its count.
+_NAME_SHAPE = re.compile(r"\A[ぁ-ゖァ-ヶー・一-龥々a-z0-9_]+\Z")
+
+
+def _fold_kana(text):
+    """Katakana → hiragana, so stoplist checks catch a word in
+    whichever script it was written (マジ vs まじ): NFKC alone does
+    not fold the two kana scripts together."""
+    return "".join(
+        chr(ord(char) - 0x60) if "ァ" <= char <= "ヶ" else char
+        for char in text
+    )
+
+
+_STOPWORDS_FOLDED = {_fold_kana(word) for word in _STOPWORDS}
+_TECH_STOPWORDS_FOLDED = {_fold_kana(word) for word in _TECH_STOPWORDS}
 
 # A real appellation belongs to a handful of people at most. A
 # string mined as the "name" of dozens of targets is a sentence
@@ -141,11 +194,14 @@ def _normalize(text):
 def _valid(candidate):
     if not candidate or not (2 <= len(candidate) <= 10):
         return False
-    if candidate in _STOPWORDS:
+    if not _NAME_SHAPE.match(candidate):
+        return False
+    folded = _fold_kana(candidate)
+    if folded in _STOPWORDS_FOLDED:
         return False
     if any(char in candidate for char in "@#<>/\\[]"):
         return False
-    if candidate in _TECH_STOPWORDS:
+    if folded in _TECH_STOPWORDS_FOLDED:
         return False
     if candidate.isdigit():
         return False
@@ -225,6 +281,7 @@ def mine_appellations(store, *, batch_rows=5000, max_batches=None, progress=None
                 "SELECT m.id, m.author_id, m.text, m.created_at, mp.user_id "
                 "FROM messages m JOIN message_people mp ON mp.message_id = m.id "
                 "WHERE mp.relation IN ('reply', 'mention') AND m.deleted = 0 "
+                "AND m.is_bot = 0 "
                 "AND m.id > ? "
                 "ORDER BY m.id LIMIT ?",
                 (str(last), batch_rows),
@@ -284,6 +341,49 @@ def mine_appellations(store, *, batch_rows=5000, max_batches=None, progress=None
     return stats
 
 
+def qualified_appellations(rows):
+    """The established appellations in raw (target, caller,
+    appellation, count) rows for ONE target, as
+    {appellation: (total_uses, distinct_callers)}.
+
+    A name is established when the server actually uses it: at least
+    GLOBAL_MIN_COUNT uses spread over at least two different callers.
+    Raw mined rows are mostly one-off sentence fragments (95% of
+    production rows had count 1); counting them raw is what let /me
+    report 1,033 "names" for one person. A name a single caller uses
+    consistently still resolves for that caller (by_caller), but it
+    is not a server-wide fact and is not counted here."""
+    aggregate = {}
+    for _target, caller, appellation, count in rows:
+        total, callers = aggregate.get(appellation, (0, set()))
+        callers.add(str(caller))
+        aggregate[appellation] = (total + int(count), callers)
+    return {
+        appellation: (total, len(callers))
+        for appellation, (total, callers) in aggregate.items()
+        if total >= GLOBAL_MIN_COUNT and len(callers) >= 2
+    }
+
+
+def representative_appellation(totals_callers):
+    """The one name to show as "the" appellation out of
+    {appellation: (total_uses, distinct_callers)}: names used by
+    several people outrank a higher raw count from a single caller
+    (one bot's repeated fragment once beat every real name this
+    way); among names with comparable spread, the most-used wins.
+    None when nothing clears the global floor."""
+    ranked = [
+        (appellation, total, callers)
+        for appellation, (total, callers) in totals_callers.items()
+        if total >= GLOBAL_MIN_COUNT
+    ]
+    if not ranked:
+        return None
+    multi = [entry for entry in ranked if entry[2] >= 2] or ranked
+    multi.sort(key=lambda entry: (-entry[1], -entry[2], entry[0]))
+    return multi[0][0]
+
+
 class AppellationIndex:
     """In-memory view of the appellation graph for resolution:
     caller-conditioned names first, then the server-wide ones, each
@@ -316,6 +416,7 @@ class AppellationIndex:
         self.by_caller = {}
         self.by_appellation = {}
         self.by_target = {}
+        self.by_target_callers = {}
         for target, caller, appellation, count in rows:
             if appellation in artifacts:
                 continue
@@ -327,6 +428,8 @@ class AppellationIndex:
             self.by_target[target][appellation] = (
                 self.by_target[target].get(appellation, 0) + count
             )
+            self.by_target_callers.setdefault(target, {})
+            self.by_target_callers[target].setdefault(appellation, set()).add(caller)
             self.by_appellation.setdefault(appellation, {})
             self.by_appellation[appellation][target] = (
                 self.by_appellation[appellation].get(target, 0) + count
@@ -462,11 +565,19 @@ class AppellationIndex:
         return appellation if total >= GLOBAL_MIN_COUNT else None
 
     def global_top(self, target_id):
-        totals = self.by_target.get(str(target_id)) or {}
+        """The representative appellation for a person: the name the
+        server at large uses. Caller spread outranks raw volume — a
+        string one caller repeats (a bot's boilerplate fragment, one
+        person's verbal tic) is not what "most people" call them."""
+        target_id = str(target_id)
+        totals = self.by_target.get(target_id) or {}
         if not totals:
             return None
-        appellation, total = max(totals.items(), key=lambda item: item[1])
-        return appellation if total >= GLOBAL_MIN_COUNT else None
+        callers = self.by_target_callers.get(target_id) or {}
+        return representative_appellation({
+            appellation: (total, len(callers.get(appellation, ())))
+            for appellation, total in totals.items()
+        })
 
 
 def appellation_list(index, person_id, caller_id=None, limit=6):
@@ -483,9 +594,11 @@ def appellation_list(index, person_id, caller_id=None, limit=6):
         for (caller, appellation), targets in index.by_caller.items():
             if caller == str(caller_id) and person_id in targets:
                 own[appellation] = targets[person_id]
+    callers = index.by_target_callers.get(person_id) or {}
     ranked = []
     for appellation, total in (index.by_target.get(person_id) or {}).items():
-        if total >= GLOBAL_MIN_COUNT or appellation in own:
+        spread = len(callers.get(appellation, ()))
+        if (total >= GLOBAL_MIN_COUNT and spread >= 2) or appellation in own:
             ranked.append((appellation, total))
     ranked.sort(key=lambda item: (-item[1], item[0]))
     return ranked[:limit]

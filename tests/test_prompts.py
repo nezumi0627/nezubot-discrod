@@ -8,12 +8,15 @@ from nezubot_discrod.assistant import Assistant
 from nezubot_discrod.bot import show_prompt
 from nezubot_discrod.codex import AppServer, CodexSecurityError
 from nezubot_discrod.config import SandboxSettings, Settings
+from nezubot_discrod.devin_answer import build_devin_prompt
 from nezubot_discrod.prompts import (
     CODEX_WIKI_TOOL_INSTRUCTIONS,
     INSTRUCTION_BOUNDARY,
+    LOG_GUIDANCE,
     SELF_MOD_PROMPT,
     SYSTEM,
     WIKI_SYSTEM,
+    conversation_prompt,
 )
 
 
@@ -103,3 +106,71 @@ def test_codex_wiki_instructions_are_public_but_not_overridable():
     with pytest.raises(CodexSecurityError, match="fixed"):
         asyncio.run(server.complete("test", messages, "/empty", wiki=Mock()))
     process.stdin.write.assert_not_called()
+
+
+def test_enumeration_guidance_distinguishes_list_from_representative():
+    # The rule the owner asked for: enumerate only when the question
+    # asks for a list/comparison or evidence must be shown; otherwise
+    # the single most representative example.
+    assert "Enumerate several" in SYSTEM
+    assert "single most representative example" in SYSTEM
+    assert "どんなのがある？" in SYSTEM
+    # It lives in SYSTEM, so every conversation prompt carries it…
+    assert "single most representative example" in conversation_prompt(log=True)
+    # …including the flattened one-shot prompt the Devin path sends.
+    prompt = build_devin_prompt([
+        {"role": "system", "content": SYSTEM},
+        {"role": "user", "content": "テスト"},
+    ])
+    assert "single most representative example" in prompt
+
+
+def test_persona_is_calm_plain_spoken_not_cheerful_not_stiff():
+    # v1.21.0 persona (owner's instruction): calm natural spoken
+    # Japanese like the assistant's usual manner; no w/emoji spam and
+    # no stiff explanatory tone either. The vex exception survives,
+    # inside the same plain style.
+    assert "calm, natural spoken Japanese" in SYSTEM
+    assert "Do not sprinkle 「w」" in SYSTEM
+    assert "no stiff keigo" in SYSTEM
+    from pathlib import Path as _Path
+
+    from nezubot_discrod import prompts as _prompts_module
+    _src = _Path(_prompts_module.__file__).read_text("utf-8")
+    assert "speaker.id {PERSONA.rival_user_id}" in _src
+    assert "drop the calm and argue back" in _src
+    # The old over-bright persona wording is gone.
+    assert "laugh them off" not in SYSTEM
+    assert "Be warm, friendly and easygoing" not in SYSTEM
+
+
+def test_commitment_guidance_check_before_conceding_and_produce():
+    # v1.21.0, from the vex benchmark loss patterns: verify before
+    # conceding a disputed fact, engage with material on the table,
+    # and produce requested artifacts instead of withdrawing.
+    assert "check the record before" in SYSTEM
+    assert "a dispute is not itself evidence" in SYSTEM
+    assert "engage with its actual content" in SYSTEM
+    assert "produce it from the evidence" in SYSTEM
+    # Reaches the Devin path through the same flattened prompt.
+    prompt = build_devin_prompt([
+        {"role": "system", "content": SYSTEM},
+        {"role": "user", "content": "テスト"},
+    ])
+    assert "check the record before" in prompt
+
+
+def test_log_guidance_series_search_target_and_boundaries():
+    # v1.21.0 LOG_GUIDANCE additions: continue an ongoing series,
+    # pick web vs log search by what is being hunted, answer
+    # first/last questions from boundary messages, and treat an
+    # attachment filename as content.
+    assert "continue a series the" in LOG_GUIDANCE
+    assert "Decide what to search before searching" in LOG_GUIDANCE
+    assert "keyword hits are the wrong evidence" in LOG_GUIDANCE
+    assert "the filename is part of the content" in LOG_GUIDANCE
+    prompt = build_devin_prompt([
+        {"role": "system", "content": conversation_prompt(log=True)},
+        {"role": "user", "content": "テスト"},
+    ])
+    assert "continue a series the" in prompt
