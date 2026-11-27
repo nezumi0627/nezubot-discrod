@@ -34,6 +34,12 @@ CREATE TABLE IF NOT EXISTS message_people (
 );
 CREATE INDEX IF NOT EXISTS message_people_user_relation
     ON message_people (user_id, relation, message_id);
+CREATE TABLE IF NOT EXISTS guild_roles (
+    guild_id TEXT NOT NULL,
+    role_id TEXT NOT NULL,
+    name TEXT NOT NULL DEFAULT '',
+    PRIMARY KEY (guild_id, role_id)
+);
 CREATE TABLE IF NOT EXISTS users (
     user_id TEXT PRIMARY KEY,
     guild_id TEXT NOT NULL,
@@ -45,20 +51,27 @@ CREATE TABLE IF NOT EXISTS users (
     created_at TEXT NOT NULL DEFAULT '',
     premium_since TEXT NOT NULL DEFAULT '',
     roles TEXT NOT NULL DEFAULT '',
+    in_guild INTEGER,
     synced_at TEXT NOT NULL DEFAULT ''
 );
 """
 
-# Columns added after the users table first shipped (v1.38.0):
+# Columns added after the users table first shipped:
 # created_at (the Discord account's creation instant, derived from
 # the snowflake id), premium_since (boost start, from the member
-# object) and roles (JSON array of role ids, from the member object).
+# object) and roles (JSON array of role ids, from the member object)
+# in v1.38.0; in_guild in v1.39.0 — 1 when the latest full member
+# listing (or a successful per-member fetch) saw the person in the
+# guild, 0 when a full listing did NOT see them (they have left),
+# NULL while no listing has ever covered them, so an unverified
+# presence is never presented as a verified absence.
 # Existing databases gain them by ALTER TABLE so the migration runs
 # inside the same ensure step as the CREATE TABLE above.
 _USER_COLUMNS = (
     ("created_at", "TEXT NOT NULL DEFAULT ''"),
     ("premium_since", "TEXT NOT NULL DEFAULT ''"),
     ("roles", "TEXT NOT NULL DEFAULT ''"),
+    ("in_guild", "INTEGER"),
 )
 
 
@@ -250,12 +263,20 @@ def user_targets(store, min_messages):
 
 
 def sync_users(store, fetch_member, *, min_messages=50, pause=0.35,
-               now=None, progress=None):
+               now=None, progress=None, fetch_roles=None):
     """Refresh the users table for authors with >= min_messages messages.
 
     ``fetch_member(guild_id, user_id)`` returns a Discord guild-member
     object or None when the profile cannot be fetched (left the guild,
-    API error); stored author fields then fill what they can.
+    API error); stored author fields then fill what they can. A
+    successful fetch also proves current membership, so the row's
+    in_guild is set; a failed fetch proves nothing (an API error looks
+    the same) and leaves in_guild untouched — only a full listing
+    (backfill_members) may mark someone as having left.
+
+    ``fetch_roles(guild_id)``, when given, refreshes the guild_roles
+    name cache once per guild the targets touch, riding along with
+    this sync instead of needing its own schedule.
     """
     if now is None:
         now = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
@@ -279,13 +300,19 @@ def sync_users(store, fetch_member, *, min_messages=50, pause=0.35,
             fields["display_name"] = (
                 fields["display_name"] or fields["username"])
         _upsert_user(store, target["author_id"], target["guild_id"],
-                     fields, now)
+                     fields, now, in_guild=1 if member is not None else None)
         synced += 1
         if progress is not None:
             progress(synced)
         if pause:
             time.sleep(pause)
-    return {"targets": len(targets), "synced": synced, "fetched": fetched}
+    result = {"targets": len(targets), "synced": synced, "fetched": fetched}
+    if fetch_roles is not None:
+        roles_synced = {}
+        for guild_id in sorted({target["guild_id"] for target in targets}):
+            roles_synced[guild_id] = sync_roles(store, fetch_roles, guild_id)
+        result["roles"] = roles_synced
+    return result
 
 
 def _member_fields(member, user_id):
@@ -318,32 +345,34 @@ def _member_fields(member, user_id):
 _USER_UPSERT = """
     INSERT INTO users (user_id, guild_id, username, display_name, nickname,
                        avatar_url, joined_at, created_at, premium_since,
-                       roles, synced_at)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                       roles, synced_at, in_guild)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     ON CONFLICT(user_id) DO UPDATE SET
         guild_id = excluded.guild_id, username = excluded.username,
         display_name = excluded.display_name, nickname = excluded.nickname,
         avatar_url = excluded.avatar_url, joined_at = excluded.joined_at,
         created_at = excluded.created_at,
         premium_since = excluded.premium_since, roles = excluded.roles,
-        synced_at = excluded.synced_at
+        synced_at = excluded.synced_at,
+        in_guild = COALESCE(excluded.in_guild, users.in_guild)
 """
 
 
-def _user_row(user_id, guild_id, fields, now):
+def _user_row(user_id, guild_id, fields, now, in_guild=None):
     return (
         user_id, guild_id, fields["username"], fields["display_name"],
         fields["nickname"], fields["avatar_url"], fields["joined_at"],
         snowflake_created_at(user_id), fields["premium_since"],
-        fields["roles"], now,
+        fields["roles"], now, in_guild,
     )
 
 
-def _upsert_user(store, user_id, guild_id, fields, now):
+def _upsert_user(store, user_id, guild_id, fields, now, in_guild=None):
     with store.connect() as db:
         ensure_people_schema(db)
         db.execute("BEGIN IMMEDIATE")
-        db.execute(_USER_UPSERT, _user_row(user_id, guild_id, fields, now))
+        db.execute(
+            _USER_UPSERT, _user_row(user_id, guild_id, fields, now, in_guild))
 
 
 def backfill_members(store, members, guild_id, *, now=None, progress=None):
@@ -353,11 +382,18 @@ def backfill_members(store, members, guild_id, *, now=None, progress=None):
     The per-author sync above only maintains authors with enough
     archived messages; a bulk listing is how every CURRENT member's
     record (joined_at above all) gets in, including members who
-    rarely speak. Rows for members who have since left are not
-    touched — their stored snapshot simply stays as it was. The
-    immutable facts this records (join date, account creation) do not
-    go stale; names and roles are refreshed by the regular sync for
-    active authors."""
+    rarely speak. The immutable facts this records (join date,
+    account creation) do not go stale; names and roles are refreshed
+    by the regular sync for active authors.
+
+    A full listing is also the one authoritative presence check: it
+    sees exactly who is in the guild right now. Listed members get
+    in_guild = 1 (through the upsert); every other stored row FOR
+    THIS GUILD is marked in_guild = 0 — they have left, and their
+    snapshot stays as the pre-departure record. Rows of other guilds
+    are untouched, and a listing that failed partway never reaches
+    this function (the lister raises), so a truncated listing cannot
+    mass-mark the guild as departed."""
     if now is None:
         now = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
     rows = []
@@ -367,7 +403,8 @@ def backfill_members(store, members, guild_id, *, now=None, progress=None):
         if not user_id:
             continue
         rows.append(_user_row(
-            user_id, guild_id, _member_fields(member, user_id), now))
+            user_id, guild_id, _member_fields(member, user_id), now,
+            in_guild=1))
     # Chunked transactions on one connection: a guild-wide listing is
     # thousands of rows, and the per-row connect + BEGIN IMMEDIATE the
     # incremental sync uses would contend with the live bot's writes.
@@ -379,7 +416,67 @@ def backfill_members(store, members, guild_id, *, now=None, progress=None):
             db.execute("COMMIT")
             if progress is not None:
                 progress(min(start + 500, len(rows)))
-    return {"backfilled": len(rows)}
+        db.execute("BEGIN IMMEDIATE")
+        db.execute(
+            "CREATE TEMP TABLE IF NOT EXISTS _listed_members "
+            "(user_id TEXT PRIMARY KEY)")
+        db.execute("DELETE FROM _listed_members")
+        db.executemany(
+            "INSERT OR IGNORE INTO _listed_members VALUES (?)",
+            [(row[0],) for row in rows],
+        )
+        departed = db.execute(
+            "UPDATE users SET in_guild = 0 WHERE guild_id = ? "
+            "AND user_id NOT IN (SELECT user_id FROM _listed_members)",
+            (str(guild_id),),
+        ).rowcount
+        db.execute("COMMIT")
+    return {"backfilled": len(rows), "departed": departed}
+
+
+def sync_roles(store, fetch_roles, guild_id):
+    """Refresh the guild_roles name cache for one guild.
+
+    ``fetch_roles(guild_id)`` returns the guild's role objects (each
+    with ``id`` and ``name``) or None when the list cannot be fetched;
+    on None the cache is left exactly as it was, so a failed fetch
+    never empties the names the member-info block resolves against.
+    The cache is replaced wholesale on success: roles are few (tens),
+    and a rename or deletion is then reflected exactly."""
+    roles = fetch_roles(guild_id)
+    if roles is None:
+        return {"roles": 0, "fetched": False}
+    rows = [
+        (str(guild_id), str(role.get("id")), role.get("name") or "")
+        for role in roles
+        if role.get("id")
+    ]
+    with store.connect() as db:
+        ensure_people_schema(db)
+        db.execute("BEGIN IMMEDIATE")
+        db.execute("DELETE FROM guild_roles WHERE guild_id = ?", (str(guild_id),))
+        db.executemany(
+            "INSERT OR REPLACE INTO guild_roles (guild_id, role_id, name) "
+            "VALUES (?, ?, ?)",
+            rows,
+        )
+        db.execute("COMMIT")
+    return {"roles": len(rows), "fetched": True}
+
+
+def role_names(store, guild_id):
+    """The cached role id -> name map for one guild ({} when the
+    guild's roles were never synced). Callers resolve only the ids
+    present here; an unresolvable id is omitted, never guessed."""
+    with store.connect() as db:
+        ensure_people_schema(db)
+        return {
+            row["role_id"]: row["name"]
+            for row in db.execute(
+                "SELECT role_id, name FROM guild_roles WHERE guild_id = ?",
+                (str(guild_id),),
+            )
+        }
 
 
 def discord_member_fetcher(token, *, api_base="https://discord.com/api/v10",
@@ -471,3 +568,41 @@ def discord_member_lister(token, *, api_base="https://discord.com/api/v10",
             after = str((page[-1].get("user") or {}).get("id") or after)
 
     return list_members
+
+
+def discord_roles_fetcher(token, *, api_base="https://discord.com/api/v10",
+                          timeout=15, retries=3):
+    """Build a fetch_roles(guild_id) callable backed by REST.
+
+    Returns the guild's role objects, or None when the list cannot
+    be fetched (missing access, repeated API errors) — the same
+    contract as discord_member_fetcher, so sync_roles can leave the
+    cache untouched on failure. Honors 429 Retry-After."""
+    def fetch(guild_id):
+        request = urllib.request.Request(
+            f"{api_base}/guilds/{guild_id}/roles",
+            headers={
+                "Authorization": f"Bot {token}",
+                "User-Agent": "nezubot-discrod server-log people sync",
+            },
+        )
+        for attempt in range(retries + 1):
+            try:
+                with urllib.request.urlopen(request, timeout=timeout) as response:
+                    return json.loads(response.read().decode("utf-8"))
+            except urllib.error.HTTPError as error:
+                if error.code == 429 and attempt < retries:
+                    try:
+                        retry_after = float(
+                            json.loads(error.read().decode("utf-8"))["retry_after"]
+                        )
+                    except Exception:
+                        retry_after = 1.0
+                    time.sleep(min(retry_after, 30.0))
+                    continue
+                return None
+            except (urllib.error.URLError, OSError, ValueError):
+                return None
+        return None
+
+    return fetch

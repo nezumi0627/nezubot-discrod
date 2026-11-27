@@ -112,11 +112,24 @@ def test_sync_users_fetched_and_fallback(store):
 
 # --- v1.38.0: member-record facts (created_at / premium_since / roles) ----
 
+# Synthetic snowflakes (never a real member's id): PERSON_A was
+# composed so its creation instant is exactly 2024-03-01T12:00:00Z,
+# PERSON_B's is 2019-06-15T08:30:00Z. The join / boost instants used
+# below are likewise invented, in the same relative shape the member
+# record takes (join minutes after creation).
+PERSON_A = "1213093380096424242"
+PERSON_A_CREATED = "2024-03-01T12:00:00Z"
+PERSON_A_JOINED = "2024-03-01T12:08:00.000000+00:00"
+PERSON_B = "589371015168000777"
+PERSON_B_CREATED = "2019-06-15T08:30:00Z"
+PERSON_B_JOINED = "2019-06-16T10:00:00.000000+00:00"
+BOOST_SINCE = "2024-05-06T07:08:09.000000+00:00"
+
+
 def test_snowflake_created_at_derives_the_account_creation_instant():
-    # A full-length snowflake (the placeholder owner id): the
-    # derived creation instant is 2016-09-05T05:11:46Z.
-    assert snowflake_created_at("222222222222222222") == "2016-09-05T05:11:46Z"
-    assert snowflake_created_at(222222222222222222) == "2016-09-05T05:11:46Z"
+    assert snowflake_created_at(PERSON_A) == PERSON_A_CREATED
+    assert snowflake_created_at(int(PERSON_A)) == PERSON_A_CREATED
+    assert snowflake_created_at(PERSON_B) == PERSON_B_CREATED
 
 
 def test_snowflake_created_at_rejects_non_snowflakes():
@@ -168,35 +181,36 @@ def test_backfill_into_a_migrated_table_lands_values_in_the_right_columns(store)
         )
         ensure_people_schema(db)
     members = [{
-        "user": {"id": "222222222222222222", "username": "testuser0627",
-                 "global_name": "テストユーザー", "avatar": None},
+        "user": {"id": PERSON_A, "username": "fakea",
+                 "global_name": "Fake A", "avatar": None},
         "nick": "",
-        "joined_at": "2024-04-10T08:00:00.000000+00:00",
-        "premium_since": "2024-05-01T00:00:00.000000+00:00",
+        "joined_at": PERSON_A_JOINED,
+        "premium_since": BOOST_SINCE,
         "roles": ["111"],
     }]
     backfill_members(store, members, "100", now="2026-11-27T00:00:00Z")
     with store.connect() as db:
         row = db.execute("SELECT * FROM users").fetchone()
-    assert row["joined_at"] == "2024-04-10T08:00:00.000000+00:00"
-    assert row["created_at"] == "2016-09-05T05:11:46Z"
-    assert row["premium_since"] == "2024-05-01T00:00:00.000000+00:00"
+    assert row["joined_at"] == PERSON_A_JOINED
+    assert row["created_at"] == PERSON_A_CREATED
+    assert row["premium_since"] == BOOST_SINCE
     assert row["roles"] == '["111"]'
     assert row["synced_at"] == "2026-11-27T00:00:00Z"
 
 
 def test_sync_users_records_member_facts(store):
-    person = "222222222222222222"
+    person = PERSON_A
     for number in range(1, 4):
-        store.upsert(record(number, author_id=person, author="testuser0627",
+        store.upsert(record(number, author_id=person, author="fakea",
                             text=f"msg {number}"))
 
     def fetch(guild_id, user_id):
         return {
-            "user": {"username": "testuser0627", "global_name": "テストユーザー", "avatar": None},
+            "user": {"username": "fakea", "global_name": "Fake A",
+                     "avatar": None},
             "nick": "",
-            "joined_at": "2024-04-10T08:00:00.000000+00:00",
-            "premium_since": "2024-05-01T00:00:00.000000+00:00",
+            "joined_at": PERSON_A_JOINED,
+            "premium_since": BOOST_SINCE,
             "roles": ["111", "222"],
         }
 
@@ -206,42 +220,42 @@ def test_sync_users_records_member_facts(store):
     with store.connect() as db:
         row = db.execute(
             "SELECT * FROM users WHERE user_id = ?", (person,)).fetchone()
-    assert row["joined_at"] == "2024-04-10T08:00:00.000000+00:00"
-    assert row["created_at"] == "2016-09-05T05:11:46Z"
-    assert row["premium_since"] == "2024-05-01T00:00:00.000000+00:00"
+    assert row["joined_at"] == PERSON_A_JOINED
+    assert row["created_at"] == PERSON_A_CREATED
+    assert row["premium_since"] == BOOST_SINCE
     assert row["roles"] == '["111", "222"]'
 
 
 def test_backfill_members_upserts_a_full_listing(store):
     members = [
         {
-            "user": {"id": "222222222222222222", "username": "testuser0627",
-                     "global_name": "テストユーザー", "avatar": "abc"},
-            "nick": "テストユーザー",
-            "joined_at": "2024-04-10T08:00:00.000000+00:00",
+            "user": {"id": PERSON_A, "username": "fakea",
+                     "global_name": "Fake A", "avatar": "abc"},
+            "nick": "ニック",
+            "joined_at": PERSON_A_JOINED,
             "premium_since": None,
             "roles": ["111"],
         },
         {
-            "user": {"id": "123456789012345678", "username": "tanuki_dev",
-                     "global_name": "タヌキ", "avatar": None},
+            "user": {"id": PERSON_B, "username": "fakeb",
+                     "global_name": "Fake B", "avatar": None},
             "nick": "",
-            "joined_at": "2024-03-01T12:00:00.000000+00:00",
-            "premium_since": "2024-05-01T00:00:00.000000+00:00",
+            "joined_at": PERSON_B_JOINED,
+            "premium_since": BOOST_SINCE,
             "roles": [],
         },
         {"user": {}, "joined_at": "2026-01-01T00:00:00Z"},  # no id: skipped
     ]
     result = backfill_members(store, members, "100", now="2026-11-27T00:00:00Z")
-    assert result == {"backfilled": 2}
+    assert result == {"backfilled": 2, "departed": 0}
     with store.connect() as db:
         rows = {row["user_id"]: row for row in db.execute("SELECT * FROM users")}
-    assert set(rows) == {"222222222222222222", "123456789012345678"}
-    owner_row = rows["222222222222222222"]
-    assert owner_row["joined_at"] == "2024-04-10T08:00:00.000000+00:00"
-    assert owner_row["created_at"] == "2016-09-05T05:11:46Z"
-    assert owner_row["premium_since"] == ""  # null in the payload, stored empty
-    assert owner_row["roles"] == '["111"]'
-    other_row = rows["123456789012345678"]
-    assert other_row["created_at"] == "2015-12-07T16:13:12Z"
-    assert other_row["premium_since"] == "2024-05-01T00:00:00.000000+00:00"
+    assert set(rows) == {PERSON_A, PERSON_B}
+    fakea = rows[PERSON_A]
+    assert fakea["joined_at"] == PERSON_A_JOINED
+    assert fakea["created_at"] == PERSON_A_CREATED
+    assert fakea["premium_since"] == ""  # null in the payload, stored empty
+    assert fakea["roles"] == '["111"]'
+    fakeb = rows[PERSON_B]
+    assert fakeb["created_at"] == PERSON_B_CREATED
+    assert fakeb["premium_since"] == BOOST_SINCE

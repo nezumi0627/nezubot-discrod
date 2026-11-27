@@ -5,6 +5,7 @@ import os
 import sqlite3
 import time
 from collections import OrderedDict, deque
+from datetime import UTC, datetime, timedelta
 from typing import Literal, NamedTuple
 from urllib.parse import unquote, urlsplit
 
@@ -28,6 +29,7 @@ from nezubot_discrod.devin_answer import DevinAnswerer
 from nezubot_discrod.feature_loader import load_features
 from nezubot_discrod.improvement_ui import handle_improve, improvement_callback
 from nezubot_discrod.member_wiki import MemberWiki
+from nezubot_discrod.message_images import collect_turn_images
 from nezubot_discrod.messages import (
     TEASER_TRIGGER_CHARS,
     Reply,
@@ -55,6 +57,21 @@ from nezubot_discrod.moderation import (
     init_moderation,
     is_muted,
     record_violation,
+)
+from nezubot_discrod.pending_turns import (
+    claim_turn,
+    claimed_answer_ids,
+    expire_turns_before,
+    get_turn,
+    has_answered_duplicate,
+    init_pending_turns,
+    list_recoverable,
+    mark_answered,
+    next_trigger_id,
+    normalize_content,
+    register_turn,
+    set_turn_state,
+    sweep_candidates,
 )
 from nezubot_discrod.persona import PERSONA
 from nezubot_discrod.prefix_commands import (
@@ -753,9 +770,18 @@ class Bot(discord.Client):
             init_moderation(self.server_log)
         except (OSError, sqlite3.Error):
             logger.exception("Moderation initialisation failed")
+        try:
+            init_pending_turns(self.server_log)
+        except (OSError, sqlite3.Error):
+            # Recovery is a backstop; a DB hiccup at startup must not
+            # take the whole bot down with it.
+            logger.exception("Pending-turn initialisation failed")
         self.log_threads = {}
         self.backfill_task = None
         self.warmup_task = None
+        self.recovery_task = None
+        self._recovery_started = False
+        self._process_started_at = datetime.now(UTC)
         if settings.provider == "codex":
             self.ai_client = CodexClient(settings, run_command_enabled=run_command_enabled())
         else:
@@ -939,6 +965,10 @@ class Bot(discord.Client):
         if self.backfill_task is not None:
             self.backfill_task.cancel()
             await asyncio.gather(self.backfill_task, return_exceptions=True)
+        recovery = getattr(self, "recovery_task", None)
+        if recovery is not None:
+            recovery.cancel()
+            await asyncio.gather(recovery, return_exceptions=True)
         await asyncio.to_thread(self.server_log.stop_embedder, timeout=5)
         await self.ai_client.close()
         await super().close()
@@ -947,6 +977,18 @@ class Bot(discord.Client):
         logger.info("Connected as %s; configured guild %s", self.user, self.settings.guild_id)
         if self.backfill_task is None or self.backfill_task.done():
             self.backfill_task = asyncio.create_task(self.backfill())
+        recover = getattr(self, "_recover_unanswered", None)
+        if not getattr(self, "_recovery_started", False) and callable(recover):
+            # Once per process (on_ready can refire on a reconnect):
+            # answer whatever a previous process left unanswered.
+            self._recovery_started = True
+            self.recovery_task = asyncio.create_task(recover())
+
+    async def _recover_unanswered(self):
+        try:
+            await _run_unanswered_recovery(self)
+        except Exception:
+            logger.exception("Unanswered-turn recovery failed")
 
     async def backfill(self):
         try:
@@ -997,156 +1039,172 @@ class Bot(discord.Client):
             note = getattr(assistant, "note_channel_activity", None)
             if callable(note):
                 note(message.channel.id)
-        if not accepting_work():
-            return
-        if message.author.bot or self.user is None:
-            return
-        if not allowed_source(
-            self.settings,
-            message.guild.id if message.guild else None,
-            message.author.id,
-        ):
-            return
-        # Blacklist / no-response gate: a listed member's prefix
-        # commands and mention/reply triggers are dropped silently
-        # (INFO log only), before either can reach a handler or the
-        # assistant. The no-response list is the moderation system's
-        # 24h mute (POLICY.md) and is enforced exactly like the
-        # blacklist. Their messages are still archived above like
-        # everyone else's — the lists gate responses, not the record.
-        # Both answer paths (Codex and Devin) sit below this point,
-        # so one check covers them together, and a listed member is
-        # never re-judged by the moderation layers below.
-        store = getattr(self, "server_log", None)
-        if store is not None:
-            try:
-                blocked = await asyncio.to_thread(
-                    is_blacklisted, store, message.author.id
+        await _handle_trigger(self, message)
+
+
+async def _handle_trigger(bot, message, *, origin="live"):
+    """Run one message through the trigger gates and the turn
+    machinery: blacklist/mute gate, prefix commands, the call
+    check, moderation layer 1, then the per-channel turn slot and
+    FIFO queue.
+
+    This is the part of on_message after archiving. The unanswered-
+    turn recovery pass re-runs recovered messages through this same
+    function, so a recovered turn is gated and answered exactly
+    like a live one; ``origin`` only labels the pending-turn row
+    the acceptance points below register.
+    """
+    if not accepting_work():
+        return
+    if message.author.bot or bot.user is None:
+        return
+    if not allowed_source(
+        bot.settings,
+        message.guild.id if message.guild else None,
+        message.author.id,
+    ):
+        return
+    # Blacklist / no-response gate: a listed member's prefix
+    # commands and mention/reply triggers are dropped silently
+    # (INFO log only), before either can reach a handler or the
+    # assistant. The no-response list is the moderation system's
+    # 24h mute (POLICY.md) and is enforced exactly like the
+    # blacklist. Their messages are still archived above like
+    # everyone else's — the lists gate responses, not the record.
+    # Both answer paths (Codex and Devin) sit below this point,
+    # so one check covers them together, and a listed member is
+    # never re-judged by the moderation layers below.
+    store = getattr(bot, "server_log", None)
+    if store is not None:
+        try:
+            blocked = await asyncio.to_thread(
+                is_blacklisted, store, message.author.id
+            )
+            muted = False
+            if not blocked:
+                muted = await asyncio.to_thread(
+                    is_muted, store, message.author.id
                 )
-                muted = False
-                if not blocked:
-                    muted = await asyncio.to_thread(
-                        is_muted, store, message.author.id
-                    )
-            except Exception:
-                logger.exception(
-                    "Blacklist/mute check failed; allowing the message"
-                )
-                blocked = False
-                muted = False
-            if blocked or muted:
-                logger.info(
-                    "Dropping message from %s user %s",
-                    "blacklisted" if blocked else "muted",
-                    message.author.id,
-                )
-                return
-        # n! prefix commands fire without a mention, ahead of the call
-        # check and the turn queue, so n!del stays reachable
-        # while an answer is being generated.
-        if parse_prefix_command(message.content or "") is not None:
-            await handle_prefix_command(self, message)
-            return
-        if message.guild is not None and not await is_call(message, self.user):
-            return
-        channel = message.channel
-        content = (
-            message.content.replace(f"<@{self.user.id}>", "")
-            .replace(f"<@!{self.user.id}>", "")
-            .strip()
-        )
-        if not content:
-            await channel.send("メッセージを入力してください。履歴の削除は /reset です。")
-            return
-        # Moderation layer 1 (POLICY.md): a calling message whose
-        # text is an unambiguous violation never reaches the model.
-        # It gets one fixed refusal and the violation is recorded
-        # silently — points are never shown to anyone, and only an
-        # escalation (mute / blacklist) is announced, with an embed
-        # in this channel. The owner is exempt from moderation
-        # entirely.
-        if store is not None and message.author.id != self.settings.owner_id:
-            match = check_message(content)
-            if match is not None:
-                logger.info(
-                    "Policy layer-1 hit (category=%s) from user %s",
-                    match.category,
-                    message.author.id,
-                )
-                await apply_policy_violation(
-                    self,
-                    message.author,
-                    match.category,
-                    source="pattern",
-                    excerpt=content,
-                    channel=channel,
-                )
-                await channel.send(REFUSAL_TEXT)
-                return
-        # Turn slot + per-channel FIFO queue (v1.27.0). Every gate
-        # above has passed, so a message that reaches this point is
-        # entitled to an answer: while the channel's turn is running,
-        # further triggers wait in the queue and are answered in
-        # arrival order instead of being dropped silently (the
-        # v1.9.1 busy drop). Two drops remain, both INFO-logged and
-        # neither reachable in normal use: the per-channel waiting
-        # cap (spam guard) and the global busy-channel cap. No
-        # "busy, retry later" notice is posted either way — a visible
-        # notice is noise the owner asked to remove (2026-11-24).
-        if channel.id in self.busy:
-            queue = _turn_queue(self, channel.id, create=True)
-            if len(queue) >= _turn_queue_limit():
-                logger.info(
-                    "Dropping message in channel %s: turn queue full "
-                    "(%d waiting)",
-                    channel.id, len(queue),
-                )
-                return
-            queue.append(_QueuedTurn(message, content))
+        except Exception:
+            logger.exception(
+                "Blacklist/mute check failed; allowing the message"
+            )
+            blocked = False
+            muted = False
+        if blocked or muted:
             logger.info(
-                "Queued message in busy channel %s (waiting=%d)",
+                "Dropping message from %s user %s",
+                "blacklisted" if blocked else "muted",
+                message.author.id,
+            )
+            return
+    # n! prefix commands fire without a mention, ahead of the call
+    # check and the turn queue, so n!del stays reachable
+    # while an answer is being generated.
+    if parse_prefix_command(message.content or "") is not None:
+        await handle_prefix_command(bot, message)
+        return
+    if message.guild is not None and not await is_call(message, bot.user):
+        return
+    channel = message.channel
+    content = (
+        message.content.replace(f"<@{bot.user.id}>", "")
+        .replace(f"<@!{bot.user.id}>", "")
+        .strip()
+    )
+    if not content:
+        await channel.send("メッセージを入力してください。履歴の削除は /reset です。")
+        return
+    # Moderation layer 1 (POLICY.md): a calling message whose
+    # text is an unambiguous violation never reaches the model.
+    # It gets one fixed refusal and the violation is recorded
+    # silently — points are never shown to anyone, and only an
+    # escalation (mute / blacklist) is announced, with an embed
+    # in this channel. The owner is exempt from moderation
+    # entirely.
+    if store is not None and message.author.id != bot.settings.owner_id:
+        match = check_message(content)
+        if match is not None:
+            logger.info(
+                "Policy layer-1 hit (category=%s) from user %s",
+                match.category,
+                message.author.id,
+            )
+            await apply_policy_violation(
+                bot,
+                message.author,
+                match.category,
+                source="pattern",
+                excerpt=content,
+                channel=channel,
+            )
+            await channel.send(REFUSAL_TEXT)
+            return
+    # Turn slot + per-channel FIFO queue (v1.27.0). Every gate
+    # above has passed, so a message that reaches this point is
+    # entitled to an answer: while the channel's turn is running,
+    # further triggers wait in the queue and are answered in
+    # arrival order instead of being dropped silently (the
+    # v1.9.1 busy drop). Two drops remain, both INFO-logged and
+    # neither reachable in normal use: the per-channel waiting
+    # cap (spam guard) and the global busy-channel cap. No
+    # "busy, retry later" notice is posted either way — a visible
+    # notice is noise the owner asked to remove (2026-11-24).
+    if channel.id in bot.busy:
+        queue = _turn_queue(bot, channel.id, create=True)
+        if len(queue) >= _turn_queue_limit():
+            logger.info(
+                "Dropping message in channel %s: turn queue full "
+                "(%d waiting)",
                 channel.id, len(queue),
             )
             return
-        if len(self.busy) >= MAX_BUSY_CHANNELS:
-            logger.info(
-                "Dropping message in channel %s: too many busy "
-                "channels (busy=%d)",
-                channel.id, len(self.busy),
-            )
-            return
-        self.busy.add(channel.id)
-        try:
-            job = _QueuedTurn(message, content)
-            from_queue = False
-            while job is not None:
-                if from_queue:
-                    waiting = _turn_queue(self, channel.id)
-                    logger.info(
-                        "Processing queued message in channel %s "
-                        "(waiting=%d)",
-                        channel.id, len(waiting) if waiting else 0,
-                    )
-                try:
-                    await _run_turn(self, job)
-                except Exception:
-                    # One failed turn must not strand the messages
-                    # queued behind it; discord.py would have logged
-                    # an escape from on_message the same way.
-                    logger.exception(
-                        "AI turn failed (channel %s)", channel.id
-                    )
-                queue = _turn_queue(self, channel.id)
-                job = queue.popleft() if queue else None
-                from_queue = job is not None
-        finally:
-            self.busy.discard(channel.id)
-            queue = _turn_queue(self, channel.id)
-            if queue is not None and not queue:
-                queues = getattr(self, "turn_queues", None)
-                if queues is not None:
-                    queues.pop(channel.id, None)
-
+        queue.append(_QueuedTurn(message, content))
+        logger.info(
+            "Queued message in busy channel %s (waiting=%d)",
+            channel.id, len(queue),
+        )
+        await _register_pending_turn(bot, message, content, origin=origin)
+        return
+    if len(bot.busy) >= MAX_BUSY_CHANNELS:
+        logger.info(
+            "Dropping message in channel %s: too many busy "
+            "channels (busy=%d)",
+            channel.id, len(bot.busy),
+        )
+        return
+    bot.busy.add(channel.id)
+    try:
+        await _register_pending_turn(bot, message, content, origin=origin)
+        job = _QueuedTurn(message, content)
+        from_queue = False
+        while job is not None:
+            if from_queue:
+                waiting = _turn_queue(bot, channel.id)
+                logger.info(
+                    "Processing queued message in channel %s "
+                    "(waiting=%d)",
+                    channel.id, len(waiting) if waiting else 0,
+                )
+            try:
+                await _run_turn(bot, job)
+            except Exception:
+                # One failed turn must not strand the messages
+                # queued behind it; discord.py would have logged
+                # an escape from on_message the same way.
+                logger.exception(
+                    "AI turn failed (channel %s)", channel.id
+                )
+            queue = _turn_queue(bot, channel.id)
+            job = queue.popleft() if queue else None
+            from_queue = job is not None
+    finally:
+        bot.busy.discard(channel.id)
+        queue = _turn_queue(bot, channel.id)
+        if queue is not None and not queue:
+            queues = getattr(bot, "turn_queues", None)
+            if queues is not None:
+                queues.pop(channel.id, None)
 def _turn_queue(bot, channel_id, *, create=False):
     """The channel's FIFO of waiting turns (None when absent).
 
@@ -1190,6 +1248,17 @@ async def _run_turn(bot, job):
                     improvement = {"self_improve": improvement_callback(
                         bot.improvements, message, bot.improvement_tasks, bot.user.id
                     )}
+                # Image attachments (v1.42.0): downloaded under caps
+                # by message_images; a collection failure degrades
+                # the turn to text-only, never breaks it.
+                try:
+                    images = await collect_turn_images(message)
+                except Exception:
+                    logger.exception(
+                        "Turn image collection failed (channel %s)",
+                        channel.id,
+                    )
+                    images = None
                 answer = await bot.assistant.reply(
                     channel.id,
                     content,
@@ -1204,6 +1273,7 @@ async def _run_turn(bot, job):
                     channel_ids=channel_ids,
                     **retrieval,
                     message_id=message.id,
+                    **({"images": images} if images else {}),
                     **({"conversation": conversation} if conversation else {}),
                     **improvement,
                 )
@@ -1249,6 +1319,410 @@ async def _run_turn(bot, job):
         parts = split_reply(answer, footer_model)
         sent = await deliver_answer(channel, content, answer, parts)
         record_answer_authors(bot, sent, message.author.id)
+        await _mark_turn_answered(bot, message, sent)
+
+
+async def _register_pending_turn(bot, message, content, *, origin):
+    """Record an accepted turn as unanswered (v1.41.0), so a crash
+    before its answer is delivered leaves a recoverable trace.
+
+    Best-effort: a DB hiccup must never break the live turn. The row
+    is a recovery aid, not the only line of defence — the startup
+    history cross-check also adopts answers whose marking was lost.
+    """
+    store = getattr(bot, "server_log", None)
+    if store is None:
+        return
+    try:
+        await asyncio.to_thread(
+            register_turn,
+            store,
+            message_id=message.id,
+            channel_id=message.channel.id,
+            guild_id=message.guild.id if message.guild else None,
+            author_id=message.author.id,
+            content=content,
+            origin=origin,
+        )
+    except Exception:
+        logger.exception(
+            "Pending-turn registration failed (message %s)", message.id
+        )
+
+
+async def _mark_turn_answered(bot, message, sent):
+    """Mark the turn's pending row answered, with the sent messages'
+    ids (v1.41.0). Best-effort like registration: when the marking is
+    lost to a crash in the window after posting, the startup
+    cross-check adopts the posted answer instead of answering twice.
+    """
+    store = getattr(bot, "server_log", None)
+    if store is None:
+        return
+    try:
+        await asyncio.to_thread(
+            mark_answered, store, message.id, [item.id for item in sent]
+        )
+    except Exception:
+        logger.exception(
+            "Pending-turn answered marking failed (message %s)", message.id
+        )
+
+
+# Unanswered-turn recovery (v1.41.0): see pending_turns.py for the
+# durable record. The recovery window bounds how old a question may
+# be and still earn a late answer; past it the conversation has moved
+# on and a late answer would be noise. Override with
+# BOT_UNANSWERED_RECOVERY_MAX_AGE_MINUTES.
+DEFAULT_RECOVERY_MAX_AGE_MINUTES = 120
+RECOVERY_ANSWER_LIMIT = 20
+RECOVERY_SCAN_LIMIT = 100
+_RECOVERY_HISTORY_LIMIT = 60
+
+
+def _recovery_max_age_minutes():
+    raw = os.environ.get("BOT_UNANSWERED_RECOVERY_MAX_AGE_MINUTES", "")
+    try:
+        value = int(raw)
+    except ValueError:
+        return DEFAULT_RECOVERY_MAX_AGE_MINUTES
+    return value if value > 0 else DEFAULT_RECOVERY_MAX_AGE_MINUTES
+
+
+def _turn_content(bot, message):
+    """The mention-stripped text a turn for this message would use —
+    the same computation _handle_trigger performs."""
+    return (
+        (message.content or "")
+        .replace(f"<@{bot.user.id}>", "")
+        .replace(f"<@!{bot.user.id}>", "")
+        .strip()
+    )
+
+
+async def _resolve_recovery_channel(bot, channel_id):
+    get_channel = getattr(bot, "get_channel", None)
+    channel = None
+    if callable(get_channel):
+        try:
+            channel = get_channel(int(channel_id))
+        except Exception:
+            channel = None
+    if channel is None:
+        fetch_channel = getattr(bot, "fetch_channel", None)
+        if callable(fetch_channel):
+            try:
+                channel = await fetch_channel(int(channel_id))
+            except Exception:
+                logger.warning(
+                    "Unanswered recovery: channel %s unfetchable",
+                    channel_id,
+                    exc_info=True,
+                )
+                return None
+    return channel
+
+
+async def _fetch_recovery_message(channel, message_id):
+    try:
+        return await channel.fetch_message(int(message_id))
+    except Exception:
+        # Deleted, or the channel is no longer readable: the question
+        # is gone either way, so there is nothing to answer.
+        logger.warning(
+            "Unanswered recovery: message %s in channel %s unfetchable",
+            message_id,
+            getattr(channel, "id", "?"),
+            exc_info=True,
+        )
+        return None
+
+
+async def _find_unclaimed_answer(bot, store, channel, trigger_id):
+    """Bot messages already posted after the trigger that no answered
+    turn claims: proof the answer went out just before a crash, in the
+    window between posting and marking. Returns their ids (empty when
+    the trigger really is unanswered)."""
+    try:
+        boundary = await asyncio.to_thread(
+            next_trigger_id, store, channel.id, trigger_id
+        )
+        claimed = await asyncio.to_thread(
+            claimed_answer_ids, store, channel.id
+        )
+    except Exception:
+        logger.exception(
+            "Unanswered recovery: cross-check lookup failed (channel %s)",
+            channel.id,
+        )
+        return ()
+    boundary_id = int(boundary) if boundary is not None else None
+    found = []
+    try:
+        history = channel.history(
+            limit=_RECOVERY_HISTORY_LIMIT,
+            after=discord.Object(id=int(trigger_id)),
+            oldest_first=True,
+        )
+        async for item in history:
+            if boundary_id is not None and item.id >= boundary_id:
+                break
+            author = getattr(item, "author", None)
+            if author is None or author.id != bot.user.id:
+                continue
+            if str(item.id) in claimed:
+                continue
+            if not (getattr(item, "content", "") or "").strip():
+                # Embed-only posts (moderation notices and the like)
+                # are not answers.
+                continue
+            found.append(str(item.id))
+    except Exception:
+        logger.exception(
+            "Unanswered recovery: history fetch failed (channel %s)",
+            channel.id,
+        )
+        return ()
+    return tuple(found)
+
+
+async def _recover_message(bot, store, message, answered_keys, *, origin):
+    """Decide one recovered candidate's fate and, when it is owed an
+    answer, run it through the ordinary trigger path.
+
+    Returns (outcome, adopted_answer_ids); outcome is one of
+    "answered", "adopted" (an answer was already posted; the caller
+    records it), "superseded" (a duplicate of an answered question),
+    "deferred" (the live machinery owns the channel right now) or
+    "refused" (a gate stopped it, exactly as a live trigger would be
+    stopped).
+    """
+    channel = message.channel
+    if not accepting_work():
+        return "deferred", ()
+    if channel.id in getattr(bot, "busy", set()):
+        return "deferred", ()
+    queue = _turn_queue(bot, channel.id)
+    if queue:
+        return "deferred", ()
+    adopted = await _find_unclaimed_answer(bot, store, channel, message.id)
+    content = _turn_content(bot, message)
+    key = (str(channel.id), str(message.author.id), normalize_content(content))
+    if adopted:
+        answered_keys.add(key)
+        return "adopted", adopted
+    if key in answered_keys:
+        return "superseded", ()
+    try:
+        duplicate = await asyncio.to_thread(
+            has_answered_duplicate,
+            store,
+            channel_id=channel.id,
+            author_id=message.author.id,
+            content=content,
+            message_id=message.id,
+        )
+    except Exception:
+        logger.exception(
+            "Unanswered recovery: duplicate check failed (message %s)",
+            message.id,
+        )
+        duplicate = False
+    if duplicate:
+        return "superseded", ()
+    await _handle_trigger(bot, message, origin=origin)
+    try:
+        row = await asyncio.to_thread(get_turn, store, message.id)
+    except Exception:
+        row = None
+    if row is not None and row["state"] == "answered":
+        answered_keys.add(key)
+        return "answered", ()
+    queue = _turn_queue(bot, channel.id)
+    if queue and any(job.message.id == message.id for job in queue):
+        # Handed to the channel's live turn loop; it marks the row
+        # when it delivers, like any queued turn.
+        return "deferred", ()
+    if channel.id in getattr(bot, "busy", set()):
+        return "deferred", ()
+    return "refused", ()
+
+
+async def _recover_pending_row(bot, store, row, answered_keys):
+    """Recover one registered-but-unanswered turn (phase A)."""
+    message_id = row["message_id"]
+    if not await asyncio.to_thread(claim_turn, store, message_id):
+        return "skipped"
+    channel = await _resolve_recovery_channel(bot, row["channel_id"])
+    if channel is None:
+        await asyncio.to_thread(set_turn_state, store, message_id, "dropped")
+        return "dropped"
+    message = await _fetch_recovery_message(channel, message_id)
+    if message is None:
+        await asyncio.to_thread(set_turn_state, store, message_id, "dropped")
+        return "dropped"
+    outcome, adopted = await _recover_message(
+        bot, store, message, answered_keys, origin="live"
+    )
+    if outcome == "adopted":
+        await asyncio.to_thread(mark_answered, store, message_id, list(adopted))
+        logger.info(
+            "Unanswered recovery: message %s was already answered "
+            "(answer posted before the crash); adopted",
+            message_id,
+        )
+        return "adopted"
+    if outcome == "superseded":
+        await asyncio.to_thread(
+            set_turn_state, store, message_id, "superseded"
+        )
+        logger.info(
+            "Unanswered recovery: message %s superseded by an answered "
+            "re-ask; not answering again",
+            message_id,
+        )
+        return "superseded"
+    if outcome == "refused":
+        await asyncio.to_thread(set_turn_state, store, message_id, "dropped")
+        logger.info(
+            "Unanswered recovery: message %s refused by the gates at "
+            "recovery time; dropped",
+            message_id,
+        )
+        return "dropped"
+    if outcome == "answered":
+        logger.info("Unanswered recovery: answered message %s", message_id)
+    return outcome
+
+
+async def _recover_sweep_candidate(bot, store, candidate, answered_keys):
+    """Recover one trigger-shaped archive message that no pending row
+    covers (phase B): it arrived while no bot process was running, so
+    it was never registered — or it was gated out live, which the
+    re-run through the trigger path simply reproduces."""
+    channel = await _resolve_recovery_channel(bot, candidate["channel_id"])
+    if channel is None:
+        return "dropped"
+    message = await _fetch_recovery_message(channel, candidate["message_id"])
+    if message is None:
+        return "dropped"
+    outcome, _adopted = await _recover_message(
+        bot, store, message, answered_keys, origin="sweep"
+    )
+    if outcome == "answered":
+        logger.info(
+            "Unanswered recovery: answered message %s (posted while "
+            "the bot was down)",
+            candidate["message_id"],
+        )
+    return outcome
+
+
+async def _run_unanswered_recovery(bot):
+    """Startup pass: answer what a previous process (or an outage)
+    left unanswered. Runs once per process, from on_ready.
+
+    Phase A works from the pending-turn table; phase B sweeps the
+    archive for calls that arrived while the bot was down entirely.
+    Both share the same decision path, so duplicates are impossible
+    beyond the cross-checks documented in pending_turns.py.
+    """
+    store = getattr(bot, "server_log", None)
+    if store is None or bot.user is None:
+        return
+    cutoff = datetime.now(UTC) - timedelta(
+        minutes=_recovery_max_age_minutes()
+    )
+    cutoff_iso = cutoff.isoformat()
+    try:
+        expired = await asyncio.to_thread(
+            expire_turns_before, store, cutoff_iso
+        )
+    except Exception:
+        logger.exception("Unanswered recovery: expiry pass failed")
+        expired = 0
+    if expired:
+        logger.info(
+            "Unanswered recovery: expired %d turn(s) older than the "
+            "recovery window",
+            expired,
+        )
+    started_at = getattr(bot, "_process_started_at", None)
+    answered_keys = set()
+    answered = 0
+    try:
+        rows = await asyncio.to_thread(
+            list_recoverable,
+            store,
+            since_iso=cutoff_iso,
+            limit=RECOVERY_SCAN_LIMIT,
+        )
+    except Exception:
+        logger.exception("Unanswered recovery: pending scan failed")
+        rows = []
+    for row in rows:
+        if answered >= RECOVERY_ANSWER_LIMIT:
+            break
+        if started_at is not None:
+            try:
+                accepted = datetime.fromisoformat(row["accepted_at"])
+            except (TypeError, ValueError):
+                accepted = None
+            if accepted is not None and accepted >= started_at:
+                # Registered by THIS process: the live machinery owns
+                # it. Recovery only handles what a previous process
+                # left behind.
+                continue
+        outcome = await _recover_pending_row(bot, store, row, answered_keys)
+        if outcome == "answered":
+            answered += 1
+    # Phase B reads the archive, so it waits for the startup backfill
+    # to finish first (bounded: a failed or stuck backfill must not
+    # block recovery forever — the sweep then works with whatever the
+    # archive already holds).
+    backfill = getattr(bot, "backfill_task", None)
+    if backfill is not None and not backfill.done():
+        try:
+            await asyncio.wait_for(asyncio.shield(backfill), timeout=600)
+        except Exception:
+            logger.warning(
+                "Unanswered recovery: backfill wait ended abnormally; "
+                "sweeping what is archived",
+                exc_info=True,
+            )
+    try:
+        candidates = await asyncio.to_thread(
+            sweep_candidates,
+            store,
+            bot_id=bot.user.id,
+            since_iso=cutoff_iso,
+            limit=RECOVERY_SCAN_LIMIT,
+        )
+    except Exception:
+        logger.exception("Unanswered recovery: archive sweep failed")
+        candidates = []
+    for candidate in candidates:
+        if answered >= RECOVERY_ANSWER_LIMIT:
+            break
+        try:
+            existing = await asyncio.to_thread(
+                get_turn, store, candidate["message_id"]
+            )
+        except Exception:
+            existing = None
+        if existing is not None:
+            # The pending table owns this message (phase A or live).
+            continue
+        outcome = await _recover_sweep_candidate(
+            bot, store, candidate, answered_keys
+        )
+        if outcome == "answered":
+            answered += 1
+    logger.info(
+        "Unanswered recovery finished: answered=%d expired=%d",
+        answered,
+        expired,
+    )
 
 
 async def search_logs(interaction, bot, query):

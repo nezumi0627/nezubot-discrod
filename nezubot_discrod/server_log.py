@@ -1261,6 +1261,8 @@ def main(argv=None):
     users.add_argument("--min-messages", type=int, default=50)
     members = subparsers.add_parser("backfill-members")
     members.add_argument("--guild-id", required=True)
+    roles = subparsers.add_parser("sync-roles")
+    roles.add_argument("--guild-id", required=True)
     search = subparsers.add_parser("search", help="Search with the bot's dense retrieval backend")
     search.add_argument("query")
     scope = search.add_mutually_exclusive_group(required=True)
@@ -1317,11 +1319,16 @@ def main(argv=None):
         token = os.environ.get("DISCORD_TOKEN")
         if not token:
             parser.exit(1, "DISCORD_TOKEN is not set\n")
-        from nezubot_discrod.server_log_people import discord_member_fetcher, sync_users
+        from nezubot_discrod.server_log_people import (
+            discord_member_fetcher,
+            discord_roles_fetcher,
+            sync_users,
+        )
 
         result = sync_users(
             store, discord_member_fetcher(token), min_messages=args.min_messages,
             progress=lambda n: print(f"Synced {n} users", flush=True),
+            fetch_roles=discord_roles_fetcher(token),
         )
         print(json.dumps(result, sort_keys=True))
     elif args.command == "backfill-members":
@@ -1331,6 +1338,8 @@ def main(argv=None):
         from nezubot_discrod.server_log_people import (
             backfill_members,
             discord_member_lister,
+            discord_roles_fetcher,
+            sync_roles,
         )
 
         listing = discord_member_lister(token)(args.guild_id)
@@ -1338,6 +1347,19 @@ def main(argv=None):
             store, listing, args.guild_id,
             progress=lambda n: print(f"Backfilled {n} members", flush=True),
         )
+        result["roles"] = sync_roles(
+            store, discord_roles_fetcher(token), args.guild_id)
+        print(json.dumps(result, sort_keys=True))
+    elif args.command == "sync-roles":
+        token = os.environ.get("DISCORD_TOKEN", "")
+        if not token:
+            parser.exit(1, "DISCORD_TOKEN is not set\n")
+        from nezubot_discrod.server_log_people import (
+            discord_roles_fetcher,
+            sync_roles,
+        )
+
+        result = sync_roles(store, discord_roles_fetcher(token), args.guild_id)
         print(json.dumps(result, sort_keys=True))
     elif args.command in {"import", "backfill-authors"}:
         with args.jsonl.open() as source:

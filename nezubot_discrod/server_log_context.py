@@ -36,7 +36,11 @@ from nezubot_discrod.server_log import (
 from nezubot_discrod.server_log import (
     _hit as _log_hit,
 )
-from nezubot_discrod.server_log_people import snowflake_created_at
+from nezubot_discrod.server_log_people import (
+    ensure_people_schema,
+    role_names,
+    snowflake_created_at,
+)
 from nezubot_discrod.server_log_timing import CURRENT, Timings, stage
 from nezubot_discrod.server_log_tools import LogResult
 from nezubot_discrod.server_wiki import ServerWiki
@@ -867,11 +871,21 @@ def _person_member_info(store, person):
     fresh error of exactly the kind the first-activity block exists
     to prevent. A person with no synced row still gets the block:
     the creation date always computes, and the join line then says
-    plainly that it is not recorded."""
+    plainly that it is not recorded.
+
+    v1.39.0 adds the person's current roles (ids resolved against
+    the guild_roles name cache; @everyone and unresolvable ids are
+    omitted rather than guessed) and an explicit presence line when
+    the latest full member listing did NOT see the person (they have
+    left: the record is a pre-departure snapshot and must not be
+    presented as a current member's) or when presence has never been
+    verified by a listing (stated as unverified, never assumed)."""
     person = str(person)
     with store.connect() as db:
+        ensure_people_schema(db)
         row = db.execute(
-            "SELECT joined_at, premium_since FROM users WHERE user_id = ?",
+            "SELECT guild_id, joined_at, premium_since, roles, in_guild "
+            "FROM users WHERE user_id = ?",
             (person,),
         ).fetchone()
     created = snowflake_created_at(person)
@@ -879,12 +893,13 @@ def _person_member_info(store, person):
         return None
     lines = [
         "メンバー情報（確定情報）: 以下はDiscordのメンバー記録とアカウントID"
-        "から機械的に得たぬの人物の確定情報。発言ログやサンプルから推測せず、"
+        "から機械的に得たこの人物の確定情報。発言ログやサンプルから推測せず、"
         "「サーバー参加日／いつ参加した」型の質問にはサーバー参加日の値で"
         "答えること。サーバー参加日はDiscordの参加記録であり、アーカイブで"
         "確認できる最古の発言（最初の発言）とは別の記録なので、互いに"
         "代用しないこと。"
     ]
+    departed = row is not None and row["in_guild"] == 0
     if row is not None and row["joined_at"]:
         lines.append(f"- サーバー参加日: {_member_stamp(row['joined_at'])}")
     else:
@@ -895,6 +910,157 @@ def _person_member_info(store, person):
             "（Discordアカウント自体が作られた日）")
     if row is not None and row["premium_since"]:
         lines.append(f"- ブースト開始日: {_member_stamp(row['premium_since'])}")
+    if row is not None:
+        names = _resolved_role_names(store, row)
+        if names:
+            label = "退会前のロール（記録）" if departed else "現在のロール"
+            lines.append(f"- {label}: {'、'.join(names)}")
+    if departed:
+        lines.append(
+            "- 在籍状況: 現在はサーバーに在籍していない"
+            "（上記の参加日・ロールは退会前の記録。在籍中のメンバーとして"
+            "扱わないこと）")
+    elif row is not None and row["in_guild"] is None:
+        lines.append(
+            "- 在籍状況: 未確認（現在のメンバー一覧とまだ照合できていない。"
+            "在籍中とも退会済みとも断定しないこと）")
+    return LogResult("\n".join(lines))
+
+
+def _resolved_role_names(store, row):
+    """The person's recorded role ids resolved to names via the
+    guild_roles cache. The @everyone role (its id IS the guild id)
+    is not a distinguishing role and is dropped; an id the cache
+    cannot name is dropped too — an unresolved id is never rendered
+    as a guessed name."""
+    try:
+        role_ids = json.loads(row["roles"] or "[]")
+    except ValueError:
+        return []
+    if not role_ids:
+        return []
+    names = role_names(store, row["guild_id"])
+    resolved = []
+    for role_id in role_ids:
+        role_id = str(role_id)
+        if role_id == str(row["guild_id"]):
+            continue
+        name = names.get(role_id)
+        if name and name not in resolved:
+            resolved.append(name)
+    return resolved
+
+
+# Server-wide join-date questions — 「最近入ったのは誰？」「参加が古い順に
+# 教えて」「2026年に入った人は？」 — are not about one resolved person,
+# so the per-person member-info block can never answer them; left to
+# search, the model composes a ranking from whichever messages it
+# happened to read. The roster block is the same deterministic move
+# at guild scope: the users table ordered by the recorded join date,
+# capped so a guild of thousands is never dumped wholesale. The
+# wording is kept member-specific on purpose (「最近入った」 alone
+# would also match 「最近入ったサブスク」), and the year form needs a
+# join verb, so ordinary person questions do not arm it.
+_MEMBER_ROSTER_QUESTION = re.compile(
+    r"(?:最近|新しく)入った(?:のは|人|メンバー|誰)|"
+    r"新しいメンバー|新規メンバー|新参|古参|"
+    r"参加が古い|入った順|参加した順|参加順|"
+    r"\d{4}年に?(?:入った|参加した)(?:人|のは|メンバー)"
+)
+_MEMBER_ROSTER_YEAR = re.compile(r"(\d{4})年")
+_MEMBER_ROSTER_OLDEST = re.compile(r"古い|古参|入った順|参加した順|参加順")
+
+# How many members one roster block lists at most. Enough to answer
+# 「最近入ったのは誰」 or a year cohort's head, small enough that the
+# block stays a slice of the ranking, never the whole guild.
+ROSTER_LIMIT = 10
+
+
+def _member_roster_signals(text, search_text=None, context_query=None):
+    """Detection signals for the deterministic member-roster block,
+    mirroring _github_signals: direct when the latest message itself
+    asks a roster-shaped question; topic when the conversation
+    carries the shape and the latest message is context-dependent
+    (a follow-up hanging on the exchange). Returns (topic, order,
+    year): order is "asc" for oldest-first asks (古い順・古参・入った順)
+    and "desc" otherwise (最近・新しい is the default reading); year
+    is the 4-digit cohort year the question names, or None."""
+    body = (text or "").strip()
+    direct = bool(_MEMBER_ROSTER_QUESTION.search(text or ""))
+    context_dependent = bool(
+        needs_rewrite(text) or _SELF.search(text or "") or len(body) <= 8
+    )
+    topic = direct or (
+        context_dependent
+        and bool(
+            _MEMBER_ROSTER_QUESTION.search(search_text or "")
+            or _MEMBER_ROSTER_QUESTION.search(context_query or "")
+        )
+    )
+    if not topic:
+        return False, "desc", None
+    source = text or ""
+    if not direct:
+        source = f"{search_text or ''} {context_query or ''}"
+    year = None
+    year_match = _MEMBER_ROSTER_YEAR.search(source)
+    if year_match:
+        candidate = int(year_match.group(1))
+        if 2015 <= candidate <= 2100:
+            year = candidate
+    order = "asc" if _MEMBER_ROSTER_OLDEST.search(source) else "desc"
+    return True, order, year
+
+
+def _member_roster(store, guild_id, *, order="desc", year=None,
+                   limit=ROSTER_LIMIT):
+    """Deterministic join-date roster for one guild: the users table
+    ordered by Discord's recorded join date, newest first (or oldest
+    first), optionally restricted to one join year. Only members the
+    listing verified as present (in_guild = 1) are listed — someone
+    who has left is not a recent joiner. The header states the slice
+    size against the matching total so the model answers within the
+    delivered range instead of presenting it as the whole guild."""
+    if not guild_id:
+        return None
+    conditions = "guild_id = ? AND joined_at != '' AND in_guild = 1"
+    args = [str(guild_id)]
+    if year is not None:
+        conditions += " AND joined_at LIKE ?"
+        args.append(f"{year}-%")
+    with store.connect() as db:
+        ensure_people_schema(db)
+        total = db.execute(
+            f"SELECT count(*) FROM users WHERE {conditions}", args
+        ).fetchone()[0]
+        rows = db.execute(
+            "SELECT display_name, username, joined_at FROM users "
+            f"WHERE {conditions} ORDER BY joined_at "
+            f"{'ASC' if order == 'asc' else 'DESC'} LIMIT ?",
+            [*args, limit],
+        ).fetchall()
+    if not rows:
+        return None
+    if year is not None:
+        scope = f"{year}年にサーバー参加したメンバー"
+        direction = "参加日が古い順" if order == "asc" else "参加日が新しい順"
+    elif order == "asc":
+        scope = "サーバー参加日が古いメンバー"
+        direction = "参加日が古い順"
+    else:
+        scope = "最近サーバー参加したメンバー"
+        direction = "参加日が新しい順"
+    lines = [
+        f"メンバー参加日一覧（確定情報）: 以下はDiscordのメンバー記録から"
+        f"機械的に集計した{scope}（{direction}、全{total}人中{len(rows)}人まで）。"
+        "発言ログやサンプルから参加順を組み立てず、この一覧の範囲で答えること。"
+        "一覧に載っていないメンバーについて順位や参加日を推測しないこと。"
+        "サーバー参加日はアーカイブ最古の発言とは別の記録である。"
+    ]
+    for row in rows:
+        name = row["display_name"] or row["username"] or ""
+        handle = f"（@{row['username']}）" if row["username"] else ""
+        lines.append(f"- {name}{handle}: {_member_stamp(row['joined_at'])}")
     return LogResult("\n".join(lines))
 
 
@@ -1001,7 +1167,8 @@ def _assess_sufficiency(available, people, *, dense_available=True,
                         snapshot_unavailable=False, grounding_cut=False,
                         has_alt_query=False, dense_extended=False,
                         summary_retried=False, github_topic=False,
-                        github_retried=False):
+                        github_retried=False, roster_topic=False,
+                        roster_retried=False):
     """Judge whether the evidence gathered so far is sufficient, and
     which routes are weak when it is not.
 
@@ -1068,12 +1235,29 @@ def _assess_sufficiency(available, people, *, dense_available=True,
     if github_missing:
         sufficient = False
         reasons = []
+    # The member roster gets the same one-retry treatment (v1.39.0):
+    # on a roster-topic turn it is the ONLY evidence that can answer
+    # the question, and its phase-1 job can miss delivery under the
+    # same deadline pressure (measured on the production archive:
+    # the topic armed, the phase was cut, no chunk arrived). Unlike
+    # the GitHub block it needs no settled person. A guild with no
+    # listing-verified members yields no roster however often it is
+    # built, so the retry is spent at most once.
+    roster_missing = (
+        roster_topic and "member_roster" not in available
+        and not roster_retried
+    )
+    if roster_missing:
+        sufficient = False
+        reasons = []
     weak = []
     if not sufficient:
         if summary_missing and not summary_retried:
             weak.append("person_summary")
         if github_missing:
             weak.append("github")
+        if roster_missing:
+            weak.append("member_roster")
         if person is not None and not target_reached:
             weak.append("author")
         if person is None and not people and grounding_cut:
@@ -1178,6 +1362,16 @@ async def pre_retrieve(log, text, *, member_wiki=None, guild_id=None, message_id
      github_context_dependent) = _github_signals(
         text, search_text, context_query)
     github_state = {"retried": False}
+    # Member-roster detection (v1.39.0): server-wide join-date
+    # questions (「最近入ったのは誰？」「参加が古い順」「2026年に
+    # 入った人」) resolve no single person, so the per-person blocks
+    # can never answer them; the roster block serves the users table
+    # ordered by the recorded join date instead. The signal follows
+    # the same direct/topic split as the GitHub block.
+    (roster_topic, roster_order, roster_year) = _member_roster_signals(
+        text, search_text, context_query)
+    roster_guild = guild_id or getattr(log.store, "guild_id", None)
+    roster_state = {"retried": False}
 
     def first_activity_fallback_subject():
         # The block's subject when grounding resolved nobody (in the
@@ -1350,6 +1544,20 @@ async def pre_retrieve(log, text, *, member_wiki=None, guild_id=None, message_id
             chunk = None
         if chunk is not None:
             publish("person_member_info", chunk)
+
+    def roster_part():
+        # Deterministic join-date roster for a server-wide question:
+        # a capped slice of the users table ordered by Discord's
+        # recorded join date. No resolved person is involved; the
+        # guild comes from the turn (falling back to the store's).
+        try:
+            chunk = _member_roster(
+                log.store, roster_guild,
+                order=roster_order, year=roster_year)
+        except (OSError, sqlite3.Error):
+            chunk = None
+        if chunk is not None:
+            publish("member_roster", chunk)
 
     def event_part(candidates):
         for chunk in _event_chunks(log, candidates, message_id):
@@ -1629,6 +1837,13 @@ async def pre_retrieve(log, text, *, member_wiki=None, guild_id=None, message_id
             # gets the same one-retry treatment as the claim check.
             github_state["retried"] = True
             jobs.append(run("github", github_part, people[0]))
+        if (roster_topic and not roster_state["retried"]
+                and "member_roster" not in available):
+            # The roster block missed the first pass the same way;
+            # on a roster-topic turn it is the only evidence that
+            # can answer, so it gets the same one retry.
+            roster_state["retried"] = True
+            jobs.append(run("member_roster", roster_part))
         if "person_summary" in weak and len(people) == 1:
             # The identity line did not survive the first pass (slot
             # contention or the phase deadline); fetch it on its own.
@@ -1736,6 +1951,8 @@ async def pre_retrieve(log, text, *, member_wiki=None, guild_id=None, message_id
                     people[0] if len(people) == 1 else None))
             if claim_dispute:
                 jobs.append(run("claim_check", claim_part))
+            if roster_topic:
+                jobs.append(run("member_roster", roster_part))
             if log.store._dense is not None:
                 if _prefetch_covers(prefetch_list, prefetch_subject, people):
                     # The prefetch already delivered this person's
@@ -1840,6 +2057,8 @@ async def pre_retrieve(log, text, *, member_wiki=None, guild_id=None, message_id
                         summary_retried=summary_state["retried"],
                         github_topic=github_topic,
                         github_retried=github_state["retried"],
+                    roster_topic=roster_topic,
+                    roster_retried=roster_state["retried"],
                     )
                     claim_pending = (
                         claim_dispute and not claim_state["retried"]
@@ -1872,6 +2091,8 @@ async def pre_retrieve(log, text, *, member_wiki=None, guild_id=None, message_id
                     summary_retried=summary_state["retried"],
                     github_topic=github_topic,
                     github_retried=github_state["retried"],
+                roster_topic=roster_topic,
+                roster_retried=roster_state["retried"],
                 )
                 if verdict["sufficient"]:
                     status = ("complete" if extension_rounds == 0
@@ -1903,13 +2124,15 @@ async def pre_retrieve(log, text, *, member_wiki=None, guild_id=None, message_id
         # reached, so resolved questions still answered thin (A-5/A-6).
         selection_order = (
             "claim_check", "person_summary", "github_facts", "person_activity",
-            "person_first_activity", "person_member_info", "appellations", "author",
+            "person_first_activity", "person_member_info", "member_roster",
+            "appellations", "author",
             "overview", "member_wiki", "server_wiki", "books",
             "ambiguity", "dense", "context", "reply_graph", "prefetch", "lexical",
         )
     else:
         selection_order = (
-            "claim_check", "github_facts", "dense", "context", "reply_graph",
+            "claim_check", "github_facts", "member_roster", "dense", "context",
+            "reply_graph",
             "books", "prefetch",
             "lexical", "ambiguity",
             "person_summary", "person_activity", "person_first_activity",
@@ -1978,6 +2201,8 @@ async def pre_retrieve(log, text, *, member_wiki=None, guild_id=None, message_id
         "first_activity_subject": fa_subject["source"],
         "first_activity_delivered": "person_first_activity" in counts,
         "member_info_delivered": "person_member_info" in counts,
+        "member_roster_question": roster_topic,
+        "member_roster_delivered": "member_roster" in counts,
         "books_delivered": "books" in counts,
         "github_question": github_direct,
         "github_topic": github_topic,

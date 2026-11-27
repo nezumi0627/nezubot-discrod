@@ -29,15 +29,15 @@ from nezubot_discrod.server_log_tools import LogTools
 
 @pytest.fixture
 def people_store(tmp_path):
-    """Person 30 (username tanuki_dev, display のの) is called タヌキ by
+    """Person 30 (username tanuki, display のの) is called タヌキ by
     caller 999 and others; person 40 is a prolific third party whose
     messages about タヌキ flood the lexical route."""
     store = ServerLog(tmp_path / "logs" / "server_log.db", guild_id="100")
     rows = []
     for index in range(6):
-        value = record(1, channel="10", text=f"tanuki_devの発言 {index}")
+        value = record(1, channel="10", text=f"tanukiの発言 {index}")
         value["id"] = str(100 + index)
-        value["author"] = {"id": "30", "username": "tanuki_dev", "bot": False}
+        value["author"] = {"id": "30", "username": "tanuki", "bot": False}
         rows.append(value)
     for index in range(5):
         value = record(1, channel="10", text=f"タヌキさん、それはどう？ {index}")
@@ -57,7 +57,7 @@ def people_store(tmp_path):
         )
         db.execute(
             "INSERT INTO users (user_id, guild_id, username, display_name, nickname) "
-            "VALUES ('30', '100', 'tanuki_dev', 'のの', '')"
+            "VALUES ('30', '100', 'tanuki', 'のの', '')"
         )
     mine_appellations(store)
     with store.connect() as db:
@@ -90,7 +90,7 @@ def test_p1_persons_own_words_reach_the_payload(people_store):
         log, "タヌキについて教えて", timeout=5, budget=1200,
     ))
     assert result.diagnostics["people"] == ["30"]
-    assert "tanuki_devの発言" in str(result)
+    assert "tanukiの発言" in str(result)
 
 
 # --- P2: grounding ---------------------------------------------------------

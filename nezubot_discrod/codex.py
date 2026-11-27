@@ -808,6 +808,7 @@ class AppServer:
         usage_baseline=None,
         scope=None,
         result_box=None,
+        images=None,
     ):
         # `scope` is accepted (and ignored here) so adapters that forward
         # the client's completion arguments verbatim keep working; thread
@@ -891,13 +892,19 @@ class AppServer:
                 "turn/start",
                 {
                     "threadId": state.thread_id,
-                    "input": [{
-                        "type": "text",
-                        "text": (
-                            input_text if input_text is not None
-                            else json.dumps(messages, ensure_ascii=False)
-                        ),
-                    }],
+                    # Image items ride after the text item: the
+                    # backend reads the turn's attachments from the
+                    # same input list (probe-verified 2026-11-27).
+                    "input": [
+                        {
+                            "type": "text",
+                            "text": (
+                                input_text if input_text is not None
+                                else json.dumps(messages, ensure_ascii=False)
+                            ),
+                        },
+                        *(images or []),
+                    ],
                     **({"effort": "low"} if state.tool_free else {}),
                 },
             )
@@ -1351,7 +1358,7 @@ class CodexClient:
     async def _create_persistent(
         self, *, model, messages, scope, wiki=None, server_log=None, web=None,
         weather=None,
-        ambient=False, private_read=False, self_improve=None,
+        ambient=False, private_read=False, self_improve=None, images=None,
     ):
         config = _thread_config(
             model, messages, wiki=wiki, server_log=server_log, web=web,
@@ -1417,6 +1424,7 @@ class CodexClient:
                 input_text=input_text,
                 usage_baseline=baseline,
                 result_box=result_box,
+                images=images,
             )
             now = time.monotonic()
             if entry is None:
@@ -1487,6 +1495,7 @@ class CodexClient:
         self, *, model, messages, wiki=None, server_log=None, web=None, weather=None,
         ambient=False,
         arbiter=False, server_wiki=False, private_read=False, self_improve=None, scope=None,
+        images=None,
         **kwargs
     ):
         async with self._turn_lock(), asyncio.timeout(600):
@@ -1503,6 +1512,7 @@ class CodexClient:
                         ambient=ambient,
                         private_read=private_read,
                         self_improve=self_improve,
+                        images=images,
                     )
                 except (CodexSecurityError, CodexRateLimited):
                     raise
@@ -1537,12 +1547,14 @@ class CodexClient:
                 server_wiki=server_wiki,
                 private_read=private_read,
                 self_improve=self_improve,
+                images=images,
             )
 
     async def _create_legacy(
         self, *, model, messages, wiki=None, server_log=None, web=None, weather=None,
         ambient=False,
         arbiter=False, server_wiki=False, private_read=False, self_improve=None,
+        images=None,
     ):
         # Never load the user's config, MCP servers, plugins, hooks or skills.
         root = self.prepare_runtime()
@@ -1565,5 +1577,6 @@ class CodexClient:
                     **({"private_read": True} if private_read else {}),
                     **({"self_improve": self_improve} if self_improve is not None else {}),
                     result_box=result_box,
+                    images=images,
                 )
         return self._response(text, result_box["usage"], result_box["sources"])
