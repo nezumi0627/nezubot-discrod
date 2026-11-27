@@ -1,8 +1,8 @@
 # nezubot-discrod
 
 ![Python](https://img.shields.io/badge/python-3.12%2B-blue)
-![Version](https://img.shields.io/badge/version-1.36.0-informational)
-![Tests](https://img.shields.io/badge/tests-1635%20passed-brightgreen)
+![Version](https://img.shields.io/badge/version-1.37.0-informational)
+![Tests](https://img.shields.io/badge/tests-1645%20passed-brightgreen)
 
 **メンションに答える Discord AI Bot。** サーバー全体の発言ログを検索（RAG）して
 過去の会話や人物について答え、メンバーごとの記憶（Wiki）を持ちます。
@@ -115,7 +115,9 @@
 - **GitHub の帰属確認** — GitHub の話題では、そのターンに特定した
   人物について API メタデータ（所有者・fork かどうか・fork 元）を
   取得して確定情報として渡す。fork の保持者を製作者と取り違え
-  たり、URL を貼っただけの人を製作者と決めつけたりしない
+  たり、URL を貼っただけの人を製作者と決めつけたりしない。話題が
+  会話で続いていれば、「Xのは？」のような省略形のフォローアップ
+  でもその人物の確定情報をそのターンに取得する
 - **現在時刻と天気のツール** — 時刻は日本時間を既定として扱い、
   天気は Open-Meteo（キー不要）から取得する
 - **回答モデルの切り替え** — `/model` でユーザーごとに回答モデルを

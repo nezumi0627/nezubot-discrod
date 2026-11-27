@@ -145,6 +145,47 @@ def _first_activity_signals(text, search_text=None, context_query=None):
     return direct, topic, context_dependent
 
 
+def _github_signals(text, search_text=None, context_query=None):
+    """Detection signals for the deterministic GitHub block.
+
+    direct: the latest message itself is about GitHub — it names
+    GitHub or links a repo (the v1.35.0 shape). topic: the
+    CONVERSATION is about GitHub even when the latest message does
+    not say so — the shape of the 2026-11-27 08:45 follow-up
+    failure, where the owner's 「タヌキのは」 carried only the new
+    person while the GitHub topic lived in the exchange itself,
+    whose words the rewritten query and the context query already
+    carry into pre_retrieve (the state topic reaches this function
+    through those two queries, the same route the first-activity
+    signals take). The v1.35.0 scheduling keyed on the raw text
+    alone, so the block was never even attempted for the resolved
+    person and the model, left with no GitHub fact for them,
+    declined to answer. A context-carried match only counts when
+    the latest message is context-dependent (a rewrite-shaped
+    follow-up, a self-reference, or a few bare characters); a long
+    self-contained message about something else does not inherit
+    the topic. The third return value is that context-dependence
+    flag, mirroring _first_activity_signals."""
+    body = (text or "").strip()
+    direct = bool(
+        _GITHUB_TOPIC.search(text or "")
+        or github_meta.extract_github_refs(text)
+    )
+    context_dependent = bool(
+        needs_rewrite(text) or _SELF.search(text or "") or len(body) <= 8
+    )
+    topic = direct or (
+        context_dependent
+        and bool(
+            _GITHUB_TOPIC.search(search_text or "")
+            or _GITHUB_TOPIC.search(context_query or "")
+            or github_meta.extract_github_refs(search_text)
+            or github_meta.extract_github_refs(context_query)
+        )
+    )
+    return direct, topic, context_dependent
+
+
 # Surrounding decoration punctuation is not part of the name people
 # type: "-aki-" is referred to as "aki". Without the strip, the
 # bare form existed only as the stripped core of relay accounts'
@@ -900,7 +941,8 @@ def _prefetch_covers(prefetch_hits, prefetch_subject, people):
 def _assess_sufficiency(available, people, *, dense_available=True,
                         snapshot_unavailable=False, grounding_cut=False,
                         has_alt_query=False, dense_extended=False,
-                        summary_retried=False):
+                        summary_retried=False, github_topic=False,
+                        github_retried=False):
     """Judge whether the evidence gathered so far is sufficient, and
     which routes are weak when it is not.
 
@@ -952,10 +994,27 @@ def _assess_sufficiency(available, people, *, dense_available=True,
     if summary_missing and not summary_retried:
         sufficient = False
         reasons = []
+    # The deterministic GitHub block gets the summary's one-retry
+    # treatment: on a GitHub-topic turn with a settled person it is
+    # the decisive evidence for any account/authorship answer, and
+    # the phase-1 job can miss delivery under deadline pressure
+    # (on 2026-11-27 08:44 the stage ran, the phase hit its
+    # deadline, and no chunk reached the result). A person with no
+    # GitHub footprint yields no block however often it is built,
+    # so — like the summary — the retry is spent at most once.
+    github_missing = (
+        github_topic and person is not None
+        and "github_facts" not in available and not github_retried
+    )
+    if github_missing:
+        sufficient = False
+        reasons = []
     weak = []
     if not sufficient:
         if summary_missing and not summary_retried:
             weak.append("person_summary")
+        if github_missing:
+            weak.append("github")
         if person is not None and not target_reached:
             weak.append("author")
         if person is None and not people and grounding_cut:
@@ -1048,6 +1107,18 @@ async def pre_retrieve(log, text, *, member_wiki=None, guild_id=None, message_id
         text, search_text, context_query)
     fa_subject = {"source": None, "person": None}
     fa_scheduled = set()
+    # GitHub detection (v1.37.0): the v1.35.0 block keyed on the
+    # latest message's own wording only, so an elliptical follow-up
+    # that only names a new person (「タヌキのは」) never armed it
+    # even though the conversation was settled on GitHub and the
+    # person resolved — the model then declined to answer rather
+    # than mix in the previous person's account. The topic signal
+    # also reads the rewritten query and the context query, the
+    # same follow-the-topic route as the first-activity block.
+    (github_direct, github_topic,
+     github_context_dependent) = _github_signals(
+        text, search_text, context_query)
+    github_state = {"retried": False}
 
     def first_activity_fallback_subject():
         # The block's subject when grounding resolved nobody (in the
@@ -1236,6 +1307,13 @@ async def pre_retrieve(log, text, *, member_wiki=None, guild_id=None, message_id
                     log.store, log.channel_ids, person)
             if block is None:
                 block = github_meta.text_github_block(log.store, text)
+            if block is None and search_text and search_text != text:
+                # A follow-up's rewrite makes it self-contained: a
+                # repo URL the demonstrative pointed at (the reply
+                # target's link) rides in on the rewritten query
+                # even when the raw words carry none.
+                block = github_meta.text_github_block(
+                    log.store, search_text)
         except Exception:
             logger.warning("GitHub metadata block unavailable", exc_info=True)
             block = None
@@ -1469,6 +1547,14 @@ async def pre_retrieve(log, text, *, member_wiki=None, guild_id=None, message_id
             # the same one-retry treatment as the person summary.
             claim_state["retried"] = True
             jobs.append(run("claim_check", claim_part))
+        if (github_topic and not github_state["retried"]
+                and "github_facts" not in available and len(people) == 1):
+            # The GitHub block missed the first pass (the phase-1
+            # job can miss delivery under deadline pressure); on a
+            # GitHub-topic turn it is the decisive evidence, so it
+            # gets the same one-retry treatment as the claim check.
+            github_state["retried"] = True
+            jobs.append(run("github", github_part, people[0]))
         if "person_summary" in weak and len(people) == 1:
             # The identity line did not survive the first pass (slot
             # contention or the phase deadline); fetch it on its own.
@@ -1488,6 +1574,11 @@ async def pre_retrieve(log, text, *, member_wiki=None, guild_id=None, message_id
                     jobs.append(run("dense_ext", author_search_ext, people[0],
                                     dense=True))
                     jobs.append(run("person_summary", summary_part, people[0]))
+                    if github_topic and "github_facts" not in available:
+                        # Grounding settled only on the retry, so the
+                        # first pass built at most the text block:
+                        # fetch the newly resolved person's block.
+                        jobs.append(run("github", github_part, people[0]))
                     if _ACTIVITY_QUESTION.search(text or ""):
                         jobs.append(run("person_activity", activity_part,
                                         people[0]))
@@ -1555,8 +1646,13 @@ async def pre_retrieve(log, text, *, member_wiki=None, guild_id=None, message_id
                 hybrid_gate["allow"] = False
             jobs = [lexical, *early]
             jobs.append(run("books", books_part))
-            if _GITHUB_TOPIC.search(text or "") or \
-                    github_meta.extract_github_refs(text):
+            if github_topic:
+                # The resolved person's block, fetched for THIS
+                # person in THIS turn — including when the GitHub
+                # topic is carried by the conversation rather than
+                # the latest words (「タヌキのは」). With nobody
+                # settled, github_part falls back to the repos the
+                # question itself links.
                 jobs.append(run(
                     "github", github_part,
                     people[0] if len(people) == 1 else None))
@@ -1660,6 +1756,8 @@ async def pre_retrieve(log, text, *, member_wiki=None, guild_id=None, message_id
                         dense_extended=bool(
                             {"dense", "author"} & set(extended_routes)),
                         summary_retried=summary_state["retried"],
+                        github_topic=github_topic,
+                        github_retried=github_state["retried"],
                     )
                     claim_pending = (
                         claim_dispute and not claim_state["retried"]
@@ -1690,6 +1788,8 @@ async def pre_retrieve(log, text, *, member_wiki=None, guild_id=None, message_id
                     grounding_cut=phase1_status == "deadline",
                     has_alt_query=bool(alt_query()),
                     summary_retried=summary_state["retried"],
+                    github_topic=github_topic,
+                    github_retried=github_state["retried"],
                 )
                 if verdict["sufficient"]:
                     status = ("complete" if extension_rounds == 0
@@ -1796,6 +1896,8 @@ async def pre_retrieve(log, text, *, member_wiki=None, guild_id=None, message_id
         "first_activity_subject": fa_subject["source"],
         "first_activity_delivered": "person_first_activity" in counts,
         "books_delivered": "books" in counts,
+        "github_question": github_direct,
+        "github_topic": github_topic,
         "github_delivered": "github_facts" in counts,
         "claim_dispute": claim_dispute,
         "claim_check_delivered": "claim_check" in counts,
