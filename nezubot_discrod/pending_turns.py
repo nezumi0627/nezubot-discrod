@@ -19,10 +19,14 @@ server log DB, ``pending_turns``:
 - at startup the recovery pass in bot.py revisits rows still pending:
   it cross-checks the channel history (an answer posted just before a
   crash, after which the marking never ran, is adopted instead of
-  duplicated), drops rows a later re-ask already covered, expires rows
-  older than the recovery window, and re-runs the rest through the
-  ordinary trigger path, so every live gate (blacklist, mute, policy)
-  applies to recovered answers exactly as to live ones;
+  duplicated), drops rows a re-ask already covered — in either
+  direction: a later answered re-ask covers the earlier copy, and an
+  earlier answered asking covers the re-ask (v1.42.1; checking only
+  the later direction let a re-ask be answered twice across two
+  recovery passes) — expires rows older than the recovery window,
+  and re-runs the rest through the ordinary trigger path, so every
+  live gate (blacklist, mute, policy) applies to recovered answers
+  exactly as to live ones;
 - the same pass also sweeps the archive for trigger-shaped messages
   that arrived while no bot process was running at all (the shape
   actually lost on 2026-11-27) and puts them through the same checks.
@@ -165,6 +169,34 @@ def mark_answered(store, message_id, answer_message_ids):
         return cursor.rowcount > 0
 
 
+def trigger_for_answer(store, answer_message_id):
+    """The trigger message id an answered bot message belongs to, or
+    None when no answered row claims it.
+
+    The reply anchor (v1.43.0) resolves a follow-up that replies to
+    one of the bot's own answers through the exchange that produced
+    the answer; the bot's answers are plain channel sends (no Discord
+    reference back to the question), so this durable record is the
+    exact route from an answer to its question. Rows are few (one per
+    answered turn), so the JSON membership is confirmed by parsing
+    after a quoted-id LIKE pre-filter."""
+    wanted = str(answer_message_id)
+    with store.connect() as db:
+        rows = db.execute(
+            "SELECT message_id, answer_message_ids FROM pending_turns"
+            " WHERE state = 'answered' AND answer_message_ids LIKE ?",
+            (f'%"{wanted}"%',),
+        ).fetchall()
+    for message_id, payload in rows:
+        try:
+            ids = [str(value) for value in json.loads(payload)]
+        except (TypeError, ValueError):
+            continue
+        if wanted in ids:
+            return str(message_id)
+    return None
+
+
 def set_turn_state(store, message_id, state):
     """Move a pending/recovering row to a terminal state (superseded /
     expired / dropped). Returns True when the row changed."""
@@ -286,6 +318,56 @@ def has_answered_duplicate(store, *, channel_id, author_id, content, message_id)
         normalize_content(row_content) == target
         for _row_id, row_content in rows
     )
+
+
+DISCORD_EPOCH_MS = 1420070400000
+
+
+def snowflake_time_ms(message_id):
+    """Creation time embedded in a Discord snowflake id, in ms."""
+    return (int(message_id) >> 22) + DISCORD_EPOCH_MS
+
+
+def has_answered_predecessor(
+    store, *, channel_id, author_id, content, message_id, max_gap_ms=None
+):
+    """True when an EARLIER turn in the same channel, by the same
+    author, with the same normalized content, is already answered —
+    this candidate is the re-ask, and the answer to the first asking
+    already covers it, so it must not be answered again.
+
+    The mirror image of has_answered_duplicate, and the check whose
+    absence produced the 2026-11-27 double answer: the first asking
+    was answered by a startup sweep (its answer duly claimed by its
+    row, so the history cross-check correctly refuses to adopt it for
+    the re-ask), the re-ask itself held no durable supersede verdict,
+    and a later process that found or was handed a pending row for
+    the re-ask had no rule left to stop it. ``max_gap_ms`` bounds how
+    far apart the two askings may be (snowflake time) and still count
+    as one question; a same-text question asked much later is a new
+    question, not a re-ask.
+    """
+    target = normalize_content(content)
+    if not target:
+        return False
+    with store.connect() as db:
+        rows = db.execute(
+            "SELECT message_id, content FROM pending_turns"
+            " WHERE channel_id = ? AND author_id = ? AND state = 'answered'"
+            " AND CAST(message_id AS INTEGER) < ?",
+            (str(channel_id), str(author_id), int(message_id)),
+        ).fetchall()
+    candidate_ms = snowflake_time_ms(message_id)
+    for row_id, row_content in rows:
+        if normalize_content(row_content) != target:
+            continue
+        if (
+            max_gap_ms is not None
+            and candidate_ms - snowflake_time_ms(row_id) > max_gap_ms
+        ):
+            continue
+        return True
+    return False
 
 
 def sweep_candidates(store, *, bot_id, since_iso, limit=100):

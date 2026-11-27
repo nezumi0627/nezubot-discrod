@@ -178,6 +178,106 @@ def repo_meta(store, owner, repo):
     return state, facts
 
 
+# GitHub logins are ASCII alphanumerics and single hyphens, never
+# leading/trailing with one. A self-declared name that does not fit
+# (「りんご」) is a name to search by, not a login to query.
+_LOGIN = re.compile(r"[A-Za-z0-9](?:[A-Za-z0-9-]*[A-Za-z0-9])?\Z")
+
+
+def plausible_login(name):
+    """Whether a stated name could be a GitHub login at all."""
+    return bool(name) and len(name) <= 39 and bool(_LOGIN.match(name))
+
+
+def fetch_user(login):
+    """Live metadata for one account as (state, facts): existence
+    and the public repo count. Kept module-level like fetch_repo so
+    tests can replace the network."""
+    state, payload = _api_get(f"/users/{login}")
+    if state != "ok" or not isinstance(payload, dict):
+        return state, None
+    return "ok", {
+        "login": payload.get("login") or login,
+        "public_repos": int(payload.get("public_repos") or 0),
+    }
+
+
+def user_meta(store, login):
+    """(state, facts) for one account, cache-first, with the same
+    TTL discipline as repo_meta (a week for a hit, a day for a 404,
+    errors never cached). The cache key lives in the same table
+    under a ``user/`` prefix so it can never collide with a repo."""
+    key = f"user/{login}".casefold()
+    now = time.time()
+    try:
+        with store.connect() as db:
+            _ensure_cache(db)
+            row = db.execute(
+                "SELECT payload, fetched_at FROM github_meta_cache "
+                "WHERE key = ?", (key,),
+            ).fetchone()
+    except sqlite3.Error:
+        row = None
+    if row is not None:
+        payload, fetched_at = row[0], row[1]
+        if payload is not None and now - fetched_at < _REPO_TTL_SECONDS:
+            try:
+                return "ok", json.loads(payload)
+            except ValueError:
+                pass
+        if payload is None and now - fetched_at < _MISSING_TTL_SECONDS:
+            return "missing", None
+    state, facts = fetch_user(login)
+    if state in ("ok", "missing"):
+        try:
+            with store.connect() as db:
+                _ensure_cache(db)
+                db.execute(
+                    "INSERT OR REPLACE INTO github_meta_cache "
+                    "(key, payload, fetched_at) VALUES (?, ?, ?)",
+                    (key, json.dumps(facts) if facts else None, now),
+                )
+        except sqlite3.Error:
+            logger.warning("GitHub user cache write failed", exc_info=True)
+    return state, facts
+
+
+def account_block(store, login):
+    """The deterministic block for one GitHub login named outright —
+    the shape a self-declared name in a replied-to message takes
+    (「俺の名前はX」): the account's existence and its most recently
+    pushed repos, fork-traced exactly like the person block, so a
+    follow-up asking for that person's GitHub is answered from the
+    declared name instead of from whoever the conversation around it
+    was about. None when the name is not a plausible login or the
+    metadata could not be fetched (a transient failure states
+    nothing); a 404 IS stated, because the API settles it."""
+    if not plausible_login(login or ""):
+        return None
+    state, facts = user_meta(store, login)
+    if state == "missing":
+        return _render([
+            f"- 申告された名前 {login} の GitHub アカウントは、GitHub API "
+            "では確認できなかった（存在しない・改名・削除のいずれか）。"
+            "この名前のアカウントは無いものとして扱うこと。"
+        ])
+    if state != "ok" or facts is None:
+        return None
+    login = facts["login"]
+    lines = [
+        f"- GitHub アカウント github.com/{login}"
+        f"（申告された名前で確認、公開 repo {facts['public_repos']} 件）"
+    ]
+    list_state, payload = _api_get(
+        f"/users/{login}/repos?per_page=100&sort=pushed")
+    if list_state == "ok" and isinstance(payload, list):
+        for repo in payload[:_MAX_REPOS_PER_BLOCK]:
+            name = (repo or {}).get("name")
+            if name:
+                lines.append(_repo_line(store, login, name, login))
+    return _render(lines)
+
+
 def _repo_line(store, owner, repo, account):
     """One repo's rendered fact line. `account` is the GitHub login
     attributed to the person the block is about (None for a bare

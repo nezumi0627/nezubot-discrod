@@ -8,7 +8,11 @@ owner). This module assembles the live exchange instead: the reply chain
 the call hangs from, the people @-mentioned in it, a compact transcript
 of the channel's latest messages, and — when the call refers to a person
 without naming anyone — the person the referent grounds to, resolved in
-that priority order: (1) the replied-to message's author, (2) a mentioned
+that priority order: (1) the replied-to message's author — or, when the
+replied-to message is the bot's own answer, the person that answer was
+about (the reply anchor, resolved through the question that produced
+the answer: the durable pending-turns record first, the transcript
+window as fallback), (2) a mentioned
 person (left to resolve_people, which reads the mention from the text),
 (3) the person the transcript is discussing most (replies received and
 mentions outweigh plain authorship), (4) the most recent other speaker
@@ -47,7 +51,18 @@ LABEL = (
     "in the final line refer to the current speaker. "
     "grounded_person: the person a "
     "demonstrative in the latest message refers to, resolved by the "
-    "application. active_topic: the application's running read of what "
+    "application. When its basis is bot_answer_subject, the "
+    "replied-to message was the bot's own earlier answer and "
+    "grounded_person is the person that answer was about (resolved "
+    "through the question that produced the answer), not the "
+    "answer's author and not whoever the transcript happens to be "
+    "discussing. declared_name, when present on grounded_person or "
+    "reply_target, is the name that person states for themselves in "
+    "the replied-to message (「俺の名前はX」): it is their own name "
+    "for themselves — use it as the key when looking that person up "
+    "(their GitHub and other accounts), together with their Discord "
+    "identity, and never as a reason to switch to a different person "
+    "who carries the same name elsewhere. active_topic: the application's running read of what "
     "this conversation is about — its topic text and the subject "
     "(person or message) it hangs on. conversation_state: the "
     "structured short-term memory of this conversation — facts "
@@ -63,6 +78,54 @@ _DEMONSTRATIVE = re.compile(
     r"(?:この|その|あの)(?:人物|人|方|奴|やつ|ひと|ヒト)|こいつ|そいつ|あいつ|彼女|彼氏"
 )
 _PERSON_REQUEST = re.compile(r"探して|さがして|調べて|検索して")
+
+# A name a message's author states for themselves. Conservative
+# shapes only: the extraction labels the REPLIED-TO person, so a
+# false positive would mislabel them — verb-shaped captures and
+# pronouns are rejected, and free-form 「名前は…」 counts only with
+# a copula closing it.
+_DECLARED_NAME_PATTERNS = (
+    re.compile(
+        r"(?:俺|おれ|私|わたし|僕|ぼく|自分)の名前は"
+        r"\s*([^\s、。・！!？?「」]{1,24})"),
+    re.compile(
+        r"(?:俺は|おれは|私は|わたしは|僕は|ぼくは)"
+        r"\s*([^\s、。・！!？?「」]{1,24}?)"
+        r"(?:です|だよ|だ|と申します)(?=$|[\s、。・！!？?])"),
+    re.compile(
+        r"名前は\s*([^\s、。・！!？?「」]{1,24}?)"
+        r"(?:です|だよ|だ|と申します|と言います)(?=$|[\s、。・！!？?])"),
+)
+_DECLARED_NAME_TAIL = re.compile(
+    r"(?:と申します|と言います|です|だよ|って|という|だ)$")
+_DECLARED_NAME_VERB = re.compile(
+    r"(?:ない|ます|たい|れる|られる|する|なる|ある|いる)$")
+_DECLARED_NAME_STOP = {
+    "これ", "それ", "あれ", "何", "なに", "誰", "だれ", "自分", "名前",
+}
+
+
+def declared_name(text):
+    """The name a message's author declares for themselves
+    (「俺の名前はりんご」 → りんご), or None."""
+    body = str(text or "")
+    for index, pattern in enumerate(_DECLARED_NAME_PATTERNS):
+        if index == 1 and len(body) > 30:
+            # The bare 「僕はXです」 shape also matches role
+            # statements (「僕は学生です」); only trust it in a
+            # short, introduction-shaped message.
+            continue
+        match = pattern.search(body)
+        if not match:
+            continue
+        name = _DECLARED_NAME_TAIL.sub("", match.group(1).strip())
+        if (
+            name
+            and name not in _DECLARED_NAME_STOP
+            and not _DECLARED_NAME_VERB.search(name)
+        ):
+            return name
+    return None
 
 
 def _display(user):
@@ -169,17 +232,96 @@ def _transcript(history_messages, anchor, chain):
     return "\n".join([*lines, anchor_line])
 
 
-def _ground(anchor, chain, history_messages, bot_id, speaker_id):
+def _origin_subject(call, history_messages, bot_id):
+    """Who the exchange a bot answer belongs to was about: a person
+    the producing call itself @-mentions (other than the bot and the
+    caller), else the author of the message the call replied to when
+    the call refers to it, else the call's own author — the shape of
+    「俺誰かわかる？」, whose subject is the asker. The bot is never
+    the subject."""
+    author = getattr(call, "author", None)
+    if author is None or getattr(author, "id", None) == bot_id:
+        return None
+    for user in getattr(call, "mentions", None) or []:
+        user_id = getattr(user, "id", None)
+        if user_id is not None and user_id not in (bot_id, author.id):
+            return user
+    text = str(getattr(call, "content", "") or "")
+    reference = getattr(call, "reference", None)
+    target_id = getattr(reference, "message_id", None) if reference else None
+    if target_id is not None and (
+        _DEMONSTRATIVE.search(text) or _PERSON_REQUEST.search(text)
+    ):
+        for item in history_messages:
+            if getattr(item, "id", None) == target_id:
+                target_author = getattr(item, "author", None)
+                if (
+                    target_author is not None
+                    and getattr(target_author, "id", None)
+                    not in (bot_id, author.id)
+                ):
+                    return target_author
+                break
+    return author
+
+
+def _history_origin(head, history_messages, bot_id):
+    """The call a bot answer was answering, found in the transcript
+    window when no durable record named it: the nearest message
+    before the answer that called the bot — an @-mention of the bot
+    or a reply to one of the bot's messages. The answer's own
+    position bounds the scan, so a later exchange's call is never
+    mistaken for this answer's question. Interleaved calls can still
+    mislead it; the durable record (pending_turns, resolved by the
+    caller) is the primary route and this is only its fallback."""
+    position = None
+    for index, item in enumerate(history_messages):
+        if getattr(item, "id", None) == getattr(head, "id", None):
+            position = index
+            break
+    if position is None:
+        return None
+    bot_message_ids = {
+        getattr(item, "id", None)
+        for item in history_messages
+        if getattr(getattr(item, "author", None), "id", None) == bot_id
+    }
+    for item in reversed(history_messages[:position]):
+        if getattr(getattr(item, "author", None), "id", None) == bot_id:
+            continue
+        mentioned_bot = any(
+            getattr(user, "id", None) == bot_id
+            for user in getattr(item, "mentions", None) or []
+        )
+        reference = getattr(item, "reference", None)
+        replied_to_bot = bool(
+            reference
+            and getattr(reference, "message_id", None) in bot_message_ids
+        )
+        if mentioned_bot or replied_to_bot:
+            return item
+    return None
+
+
+def _ground(anchor, chain, history_messages, bot_id, speaker_id,
+            origin_call=None):
     """Resolve a person-referring call to one person, or None.
 
     An explicit @-mention in the call text is left to resolve_people.
     Grounding only fires on a demonstrative (この人物/この人…), or on a
     search-style request attached to a reply; the referent is then, in
-    order: the replied-to author, the author of the message the call
-    replies to when that message sits in the transcript window (the
-    reply chain itself sometimes cannot be fetched), the person the
-    transcript is discussing most, and finally the most recent other
-    speaker. The speaker and the bot itself are never grounded to."""
+    order: the replied-to author — or, when the replied-to message is
+    the bot's own answer, the person that answer was about (the
+    reply anchor: a bot answer's subject is set by the exchange that
+    produced it, never by whoever the surrounding conversation is
+    discussing) — the author of the message the call replies to when
+    that message sits in the transcript window (the reply chain
+    itself sometimes cannot be fetched), the person the transcript
+    is discussing most, and finally the most recent other speaker.
+    The speaker and the bot itself are never grounded to — except
+    through the reply anchor, where the speaker genuinely can be the
+    subject (the bot answered a question about the asker, and the
+    asker follows up on that answer)."""
     text = str(getattr(anchor, "content", "") or "")
     mentioned = [
         user for user in getattr(anchor, "mentions", None) or []
@@ -201,16 +343,42 @@ def _ground(anchor, chain, history_messages, bot_id, speaker_id):
             "basis": basis,
         }
 
-    if chain and eligible(chain[0].author):
-        return grounded(chain[0].author, "reply_target")
+    def with_declared(result, *messages):
+        for item in messages:
+            name = declared_name(getattr(item, "content", ""))
+            if name:
+                result["declared_name"] = name
+                break
+        return result
+
     by_id = {}
     for item in (*history_messages, *chain):
         by_id[getattr(item, "id", None)] = item
     reference = getattr(anchor, "reference", None)
     target_id = getattr(reference, "message_id", None) if reference else None
+    head = chain[0] if chain else by_id.get(target_id)
+    if head is not None and getattr(head.author, "id", None) == bot_id:
+        # The reply target is the bot's own answer: the demonstrative
+        # binds to the person that answer was about. The bot's
+        # answers are plain sends with no Discord reference back to
+        # their question, so the producing call comes from the
+        # caller's durable record (origin_call) or, failing that,
+        # from the transcript window. When neither names it, the
+        # ordinary fallbacks below apply, as before.
+        origin = origin_call
+        if origin is None or getattr(origin, "author", None) is None:
+            origin = _history_origin(head, history_messages, bot_id)
+        if origin is not None:
+            subject = _origin_subject(origin, history_messages, bot_id)
+            if subject is not None:
+                return with_declared(
+                    grounded(subject, "bot_answer_subject"), origin)
+    if chain and eligible(chain[0].author):
+        return with_declared(
+            grounded(chain[0].author, "reply_target"), chain[0])
     target = by_id.get(target_id)
     if target is not None and eligible(target.author):
-        return grounded(target.author, "reply_target")
+        return with_declared(grounded(target.author, "reply_target"), target)
     discussed = _most_discussed(history_messages, by_id, bot_id, speaker_id)
     if discussed is not None:
         return grounded(discussed, "discussed_in_transcript")
@@ -263,9 +431,14 @@ def _most_discussed(history_messages, by_id, bot_id, speaker_id):
     return best[1] if best is not None else None
 
 
-async def build_conversation_context(message, bot_id):
+async def build_conversation_context(message, bot_id, *, origin_call=None):
     """Assemble the conversation dict for Assistant.reply, or None when
-    nothing beyond the message itself could be gathered."""
+    nothing beyond the message itself could be gathered.
+
+    origin_call, when the caller could name it (the durable
+    pending-turns record), is the message whose question produced
+    the bot answer this message replies to; it anchors the grounding
+    when the reply target is one of the bot's own answers."""
     try:
         chain = await _reply_chain(message)
         history_messages = await _history(getattr(message, "channel", None), message)
@@ -302,12 +475,17 @@ async def build_conversation_context(message, bot_id):
             "message_id": str(head.id),
             "content": _clip(getattr(head, "content", ""), REPLY_TEXT_LIMIT),
         }
+        target_declared = declared_name(getattr(head, "content", ""))
+        if target_declared:
+            context["reply_target"]["declared_name"] = target_declared
     if mentions:
         context["mentions"] = list(mentions.values())
     transcript = _transcript(history_messages, message, chain)
     if transcript:
         context["transcript"] = transcript
-    grounded = _ground(message, chain, history_messages, bot_id, speaker_id)
+    grounded = _ground(
+        message, chain, history_messages, bot_id, speaker_id,
+        origin_call=origin_call)
     if grounded:
         context["grounded_person"] = grounded
     if len(context) == 1:

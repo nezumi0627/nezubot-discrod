@@ -779,6 +779,18 @@ class Assistant:
                 budgets=ROUTE_BUDGETS_MS, search_text=search_text,
                 context_query=context_query, budget=retrieval_budget,
                 prefetch_hits=prefetch_hits, prefetch_subject=prefetch_subject,
+                # A reply anchor (the replied-to author, or the person
+                # a replied-to bot answer was about) is trusted even
+                # when it names the caller, and a name the anchored
+                # person declares for themselves in the replied-to
+                # message rides along as a lookup key.
+                seed_anchor=grounded.get("basis") in (
+                    "reply_target", "bot_answer_subject"),
+                declared_name=(
+                    grounded.get("declared_name")
+                    or ((conversation or {}).get("reply_target") or {}).get(
+                        "declared_name")
+                ),
             ))
         if self.system_prompt == SYSTEM and guild_info is not None:
             # Server facts sit immediately after the message itself —

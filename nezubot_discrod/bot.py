@@ -64,6 +64,7 @@ from nezubot_discrod.pending_turns import (
     expire_turns_before,
     get_turn,
     has_answered_duplicate,
+    has_answered_predecessor,
     init_pending_turns,
     list_recoverable,
     mark_answered,
@@ -72,6 +73,7 @@ from nezubot_discrod.pending_turns import (
     register_turn,
     set_turn_state,
     sweep_candidates,
+    trigger_for_answer,
 )
 from nezubot_discrod.persona import PERSONA
 from nezubot_discrod.prefix_commands import (
@@ -1219,6 +1221,50 @@ def _turn_queue(bot, channel_id, *, create=False):
     return queues.get(channel_id)
 
 
+async def _reply_origin_call(bot, message):
+    """The message whose question produced the bot answer this
+    message replies to, or None.
+
+    The bot's answers are plain channel sends, so a follow-up that
+    replies to one carries no Discord path back to the question the
+    answer belongs to; the durable pending-turns record (v1.41.0)
+    maps the answer's id to its trigger, and one fetch recovers the
+    trigger message itself. Only attempted when the reply target is
+    the bot's own message (or unresolved, where its author is not
+    yet known); every failure degrades to None, and the grounding
+    then falls back to the transcript window, as before."""
+    reference = getattr(message, "reference", None)
+    target_id = getattr(reference, "message_id", None) if reference else None
+    if target_id is None:
+        return None
+    resolved = getattr(reference, "resolved", None)
+    if resolved is not None and (
+        getattr(getattr(resolved, "author", None), "id", None)
+        != getattr(bot.user, "id", None)
+    ):
+        return None
+    store = getattr(bot, "server_log", None)
+    if store is None:
+        return None
+    try:
+        trigger_id = await asyncio.to_thread(
+            trigger_for_answer, store, target_id)
+    except Exception:
+        logger.warning("Reply origin lookup failed", exc_info=True)
+        return None
+    if trigger_id is None:
+        return None
+    channel = getattr(message, "channel", None)
+    fetch = getattr(channel, "fetch_message", None)
+    if fetch is None:
+        return None
+    try:
+        return await fetch(int(trigger_id))
+    except Exception:
+        logger.warning("Reply origin fetch failed", exc_info=True)
+        return None
+
+
 async def _run_turn(bot, job):
     """Run one answer turn for a message that passed every gate.
 
@@ -1233,7 +1279,9 @@ async def _run_turn(bot, job):
     message = job.message
     content = job.content
     channel = message.channel
-    conversation = await build_conversation_context(message, bot.user.id)
+    origin_call = await _reply_origin_call(bot, message)
+    conversation = await build_conversation_context(
+        message, bot.user.id, origin_call=origin_call)
     async with bot.slots:
         try:
             channel_ids = await allowed_channel_ids(bot, message.author)
@@ -1530,6 +1578,29 @@ async def _recover_message(bot, store, message, answered_keys, *, origin):
         duplicate = False
     if duplicate:
         return "superseded", ()
+    try:
+        predecessor = await asyncio.to_thread(
+            has_answered_predecessor,
+            store,
+            channel_id=channel.id,
+            author_id=message.author.id,
+            content=content,
+            message_id=message.id,
+            max_gap_ms=_recovery_max_age_minutes() * 60 * 1000,
+        )
+    except Exception:
+        logger.exception(
+            "Unanswered recovery: predecessor check failed (message %s)",
+            message.id,
+        )
+        predecessor = False
+    if predecessor:
+        # The first asking of this exact question was already
+        # answered (v1.42.1): this candidate is the re-ask. The
+        # history cross-check above cannot see that answer — it is
+        # claimed by the first asking's row, quite correctly — so
+        # without this check the re-ask is generated a second time.
+        return "superseded", ()
     await _handle_trigger(bot, message, origin=origin)
     try:
         row = await asyncio.to_thread(get_turn, store, message.id)
@@ -1615,7 +1686,51 @@ async def _recover_sweep_candidate(bot, store, candidate, answered_keys):
             "the bot was down)",
             candidate["message_id"],
         )
+    if outcome == "superseded":
+        await _record_sweep_superseded(bot, store, message)
     return outcome
+
+
+async def _record_sweep_superseded(bot, store, message):
+    """Persist a sweep candidate's superseded verdict (v1.42.1).
+
+    A sweep candidate has no pending row, so until v1.42.1 its
+    superseded verdict lived only in the pass's in-memory key set:
+    the process died, the verdict died with it, and the re-ask stood
+    as a fresh unanswered candidate for the next process — which is
+    how the 2026-11-27 re-ask came to be answered a second time.
+    Recording the verdict as a terminal row makes every later pass
+    skip the message entirely (phase B defers to the table) and keeps
+    the decision auditable. Only a row this call created is moved: a
+    row that already exists belongs to the live machinery or an
+    earlier verdict and is left alone.
+    """
+    try:
+        created = await asyncio.to_thread(
+            register_turn,
+            store,
+            message_id=message.id,
+            channel_id=message.channel.id,
+            guild_id=message.guild.id if message.guild else None,
+            author_id=message.author.id,
+            content=_turn_content(bot, message),
+            origin="sweep",
+        )
+        if created:
+            await asyncio.to_thread(
+                set_turn_state, store, message.id, "superseded"
+            )
+            logger.info(
+                "Unanswered recovery: message %s superseded by an "
+                "answered duplicate; verdict recorded",
+                message.id,
+            )
+    except Exception:
+        logger.exception(
+            "Unanswered recovery: recording superseded verdict failed "
+            "(message %s)",
+            message.id,
+        )
 
 
 async def _run_unanswered_recovery(bot):

@@ -478,14 +478,23 @@ def _dominant_author(db, where, args, author_ids):
 
 
 def resolve_people(store, channel_ids, text, caller_id, message_id=None, seed=None,
-                   carryover=None, deadline=None):
+                   carryover=None, deadline=None, seed_trusted=False):
     """Resolve the people a question is about, in priority order.
 
     deadline is an absolute perf_counter() time for the grounding
     route's own budget: the resolution SQL runs under a progress
     handler on this call's dedicated connection and is interrupted
     once the budget is spent, degrading to no people rather than
-    eating the dense route's budget too."""
+    eating the dense route's budget too.
+
+    seed_trusted marks a seed that came from the reply anchor (the
+    replied-to message's author, or the person a replied-to bot
+    answer was about): there the caller genuinely can be the
+    subject — the bot answered a question about the asker and the
+    asker follows up on that answer — so the seed is honoured even
+    when it names the caller. A transcript-derived seed keeps the
+    caller exclusion, since the conversation layer never grounds a
+    demonstrative to the speaker through those routes."""
     if not channel_ids:
         return []
     where, args = store._scope(channel_ids, exclude_message_id=message_id)
@@ -499,6 +508,7 @@ def resolve_people(store, channel_ids, text, caller_id, message_id=None, seed=No
             return _resolve_people_db(
                 db, store, where, args, channel_ids, text, caller_id,
                 message_id, seed, carryover, deadline, salvage=salvage,
+                seed_trusted=seed_trusted,
             )
         except sqlite3.OperationalError as error:
             if deadline is not None and "interrupted" in str(error).lower():
@@ -522,7 +532,8 @@ def resolve_people(store, channel_ids, text, caller_id, message_id=None, seed=No
 
 
 def _resolve_people_db(db, store, where, args, channel_ids, text, caller_id,
-                       message_id, seed, carryover, deadline=None, salvage=None):
+                       message_id, seed, carryover, deadline=None, salvage=None,
+                       seed_trusted=False):
     def over_budget():
         # Explicit checkpoints complement the progress handler: short
         # queries can finish between its callbacks, so a spent budget
@@ -536,7 +547,7 @@ def _resolve_people_db(db, store, where, args, channel_ids, text, caller_id,
         wanted = list(dict.fromkeys(mentions))
         existing = _existing_authors(db, where, args, wanted, non_bot=True)
         return [value for value in wanted if value in existing]
-    if seed is not None and str(seed) != str(caller_id):
+    if seed is not None and (seed_trusted or str(seed) != str(caller_id)):
         # The conversation layer grounded a demonstrative (この人物…)
         # to this person from the reply chain or the live transcript.
         # Trust it when the person has in-scope messages (bot authors
@@ -1283,7 +1294,8 @@ async def pre_retrieve(log, text, *, member_wiki=None, guild_id=None, message_id
                        seed_person=None, carryover_person=None, timeout=0.85, budget=6000,
                        budgets=None, search_text=None, context_query=None,
                        hard_cap=2.5, adaptive=True, prefetch_hits=None,
-                       prefetch_subject=None):
+                       prefetch_subject=None, seed_anchor=False,
+                       declared_name=None):
     """Add person history and Server Wiki; private member-wiki excerpts are caller-only.
 
     search_text replaces the question for the archive searches (a
@@ -1293,6 +1305,15 @@ async def pre_retrieve(log, text, *, member_wiki=None, guild_id=None, message_id
     search built from the live conversation, so relevant past messages
     surface from the flow of the discussion rather than only from the
     question's own words.
+
+    seed_anchor marks seed_person as a reply anchor (the replied-to
+    message's author, or the person a replied-to bot answer was
+    about): the seed is then trusted even when it is the caller.
+    declared_name is a name the anchored person states for
+    themselves in the replied-to message (「俺の名前はX」): on a
+    GitHub-topic turn it is also tried as the account to look up,
+    since that name — not the surrounding conversation — is the key
+    the reply points at.
 
     With route budgets passed and adaptive on, the first pass is only
     the opening move: if the evidence it gathers is not sufficient
@@ -1372,6 +1393,15 @@ async def pre_retrieve(log, text, *, member_wiki=None, guild_id=None, message_id
         text, search_text, context_query)
     roster_guild = guild_id or getattr(log.store, "guild_id", None)
     roster_state = {"retried": False}
+
+    def resolve_grounding(*args):
+        # resolve_people with this turn's seed-trust folded in, so
+        # the run() call sites keep their established shape — and the
+        # call itself keeps the old shape whenever no trust is in
+        # play.
+        if seed_anchor:
+            return resolve_people(*args, seed_trusted=True)
+        return resolve_people(*args)
 
     def first_activity_fallback_subject():
         # The block's subject when grounding resolved nobody (in the
@@ -1601,6 +1631,27 @@ async def pre_retrieve(log, text, *, member_wiki=None, guild_id=None, message_id
             block = None
         if block:
             publish("github_facts", LogResult(block))
+        if declared_name:
+            # The anchored person's own stated name is a lookup key
+            # in its own right (「俺の名前はX」と書いたメッセージへの
+            # 返信で「こいつのGitHubさがして」): try it as an
+            # account name alongside the person's block. It rides as
+            # a second chunk of the same kind; a name that is not a
+            # plausible login, or an account the person's own block
+            # already named, adds nothing.
+            try:
+                account = github_meta.account_block(
+                    log.store, declared_name)
+            except Exception:
+                logger.warning(
+                    "Declared-name GitHub block unavailable", exc_info=True)
+                account = None
+            if account and (
+                block is None
+                or f"github.com/{declared_name}".casefold()
+                not in block.casefold()
+            ):
+                publish("github_facts", LogResult(account))
 
     def claim_part():
         # The verification search behind the gate: the claim's
@@ -1851,7 +1902,7 @@ async def pre_retrieve(log, text, *, member_wiki=None, guild_id=None, message_id
             jobs.append(run("person_summary", summary_part, people[0]))
         if "grounding" in weak:
             retry = await run(
-                "people_ext", resolve_people, log.store, log.channel_ids,
+                "people_ext", resolve_grounding, log.store, log.channel_ids,
                 text, log.caller_id, message_id, seed_person, carryover_person,
                 perf_counter() + EXTENSION_BUDGETS_MS["grounding_ms"] / 1000.0,
             ) or []
@@ -1932,7 +1983,8 @@ async def pre_retrieve(log, text, *, member_wiki=None, guild_id=None, message_id
                 early.append(asyncio.create_task(
                     run("person_first_activity", first_activity_part, subject)))
         try:
-            people = await run("people", resolve_people, log.store, log.channel_ids,
+            people = await run("people", resolve_grounding, log.store,
+                               log.channel_ids,
                                text, log.caller_id, message_id, seed_person,
                                carryover_person, grounding_deadline) or []
             if people and aux_gate_mode == "grounding":
@@ -2207,6 +2259,8 @@ async def pre_retrieve(log, text, *, member_wiki=None, guild_id=None, message_id
         "github_question": github_direct,
         "github_topic": github_topic,
         "github_delivered": "github_facts" in counts,
+        "seed_anchor": bool(seed_anchor),
+        "declared_name": bool(declared_name),
         "claim_dispute": claim_dispute,
         "claim_check_delivered": "claim_check" in counts,
         "claim_author_hits": claim_author_hits,
