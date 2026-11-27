@@ -1,8 +1,8 @@
 # nezubot-discrod
 
 ![Python](https://img.shields.io/badge/python-3.12%2B-blue)
-![Version](https://img.shields.io/badge/version-1.37.0-informational)
-![Tests](https://img.shields.io/badge/tests-1645%20passed-brightgreen)
+![Version](https://img.shields.io/badge/version-1.38.0-informational)
+![Tests](https://img.shields.io/badge/tests-1661%20passed-brightgreen)
 
 **メンションに答える Discord AI Bot。** サーバー全体の発言ログを検索（RAG）して
 過去の会話や人物について答え、メンバーごとの記憶（Wiki）を持ちます。
@@ -95,6 +95,10 @@
   その人の発言を新しい順に機械集計した確定日時（日本時間・
   チャンネル・本文つき）で答える。サンプルや検索結果の日付から
   推測しない
+- **メンバー記録の確定情報** — サーバー参加日（Discord のメンバー
+  記録）・アカウント作成日（ID から算出）・ブースト開始日を
+  「メンバー情報（確定情報）」として人物の材料に渡す。参加日と
+  アーカイブ最古の発言は別の記録として区別して渡す
 - **`/me` 理解度メーター** — Bot が自分をどれくらい理解しているかを、
   理解度 % と内訳（呼ばれ方のカバー・発言の埋め込み状況・名前や
   別名の記録・サーバー Wiki の人物記事・人物関係）で表示する。

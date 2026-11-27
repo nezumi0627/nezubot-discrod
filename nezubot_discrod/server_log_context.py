@@ -36,6 +36,7 @@ from nezubot_discrod.server_log import (
 from nezubot_discrod.server_log import (
     _hit as _log_hit,
 )
+from nezubot_discrod.server_log_people import snowflake_created_at
 from nezubot_discrod.server_log_timing import CURRENT, Timings, stage
 from nezubot_discrod.server_log_tools import LogResult
 from nezubot_discrod.server_wiki import ServerWiki
@@ -99,7 +100,7 @@ _ACTIVITY_QUESTION = re.compile(
 # messages. Left to those, the model composes a date from whatever hit
 # it read last; on 2026-11-26 it answered the owner's 「初参加」 with
 # 2026-10-23 11:58 UTC, a timestamp of other people's messages (the
-# true earliest for his account is 2026-07-18). Questions matching
+# true earliest for his account was months earlier). Questions matching
 # this shape get a mechanically aggregated person_first_activity
 # chunk instead.
 _FIRST_ACTIVITY_QUESTION = re.compile(
@@ -839,6 +840,64 @@ def _person_first_activity(store, channel_ids, person, *, message_id=None):
     return LogResult("\n".join(lines))
 
 
+def _member_stamp(iso_text):
+    """One recorded instant rendered for the member-info block:
+    JST date and time, the same rendering the activity lines use."""
+    moment = datetime.fromisoformat(iso_text)
+    if moment.tzinfo is None:
+        moment = moment.replace(tzinfo=UTC)
+    jst = moment.astimezone(_JST)
+    return (f"{jst.year}年{jst.month}月{jst.day}日 "
+            f"{jst.hour}:{jst.minute:02d}（JST）")
+
+
+def _person_member_info(store, person):
+    """Deterministic member-record facts for one resolved person.
+
+    Until v1.38.0 the model closed person summaries with 「サーバー
+    参加日そのものは分からない」 even though the join date already
+    sat in the users table: nothing carried it into the materials.
+    The block states the three record facts Discord itself keeps —
+    the server join date (member.joined_at, synced from the guild
+    member API), the account creation instant (arithmetic on the
+    snowflake id, available for every id), and the boost start when
+    one is recorded — each labelled as what it is, with the join date
+    explicitly distinct from the archive's earliest message: the two
+    are different records and substituting one for the other is a
+    fresh error of exactly the kind the first-activity block exists
+    to prevent. A person with no synced row still gets the block:
+    the creation date always computes, and the join line then says
+    plainly that it is not recorded."""
+    person = str(person)
+    with store.connect() as db:
+        row = db.execute(
+            "SELECT joined_at, premium_since FROM users WHERE user_id = ?",
+            (person,),
+        ).fetchone()
+    created = snowflake_created_at(person)
+    if row is None and not created:
+        return None
+    lines = [
+        "メンバー情報（確定情報）: 以下はDiscordのメンバー記録とアカウントID"
+        "から機械的に得たぬの人物の確定情報。発言ログやサンプルから推測せず、"
+        "「サーバー参加日／いつ参加した」型の質問にはサーバー参加日の値で"
+        "答えること。サーバー参加日はDiscordの参加記録であり、アーカイブで"
+        "確認できる最古の発言（最初の発言）とは別の記録なので、互いに"
+        "代用しないこと。"
+    ]
+    if row is not None and row["joined_at"]:
+        lines.append(f"- サーバー参加日: {_member_stamp(row['joined_at'])}")
+    else:
+        lines.append("- サーバー参加日: 未記録（メンバー記録をまだ同期できていない）")
+    if created:
+        lines.append(
+            f"- アカウント作成日: {_member_stamp(created)}"
+            "（Discordアカウント自体が作られた日）")
+    if row is not None and row["premium_since"]:
+        lines.append(f"- ブースト開始日: {_member_stamp(row['premium_since'])}")
+    return LogResult("\n".join(lines))
+
+
 _QUOTED_PHRASE = re.compile(r"[「『]([^」』]{2,60})[」』]")
 _ASCII_RUN = re.compile(r"[A-Za-z0-9]+(?:[ ._-]+[A-Za-z0-9]+)*")
 
@@ -1277,6 +1336,21 @@ async def pre_retrieve(log, text, *, member_wiki=None, guild_id=None, message_id
         if chunk is not None:
             publish("person_first_activity", chunk)
 
+    def member_info_part(person):
+        # Deterministic member-record facts (join date, account
+        # creation, boost start) for the resolved person: rides with
+        # the person bundle so person summaries can state the join
+        # date instead of closing with 「参加日は分からない」 (the
+        # 2026-11-27 10:25 summary did exactly that while the value
+        # already sat in the users table). One indexed lookup on the
+        # users table plus snowflake arithmetic — no API call.
+        try:
+            chunk = _person_member_info(log.store, person)
+        except (OSError, sqlite3.Error):
+            chunk = None
+        if chunk is not None:
+            publish("person_member_info", chunk)
+
     def event_part(candidates):
         for chunk in _event_chunks(log, candidates, message_id):
             publish("server_wiki", chunk)
@@ -1574,6 +1648,8 @@ async def pre_retrieve(log, text, *, member_wiki=None, guild_id=None, message_id
                     jobs.append(run("dense_ext", author_search_ext, people[0],
                                     dense=True))
                     jobs.append(run("person_summary", summary_part, people[0]))
+                    jobs.append(run("person_member_info", member_info_part,
+                                    people[0]))
                     if github_topic and "github_facts" not in available:
                         # Grounding settled only on the retry, so the
                         # first pass built at most the text block:
@@ -1637,6 +1713,8 @@ async def pre_retrieve(log, text, *, member_wiki=None, guild_id=None, message_id
                 early.append(asyncio.create_task(
                     run("person_summary", summary_part, subject)))
                 early.append(asyncio.create_task(
+                    run("person_member_info", member_info_part, subject)))
+                early.append(asyncio.create_task(
                     run("person_first_activity", first_activity_part, subject)))
         try:
             people = await run("people", resolve_people, log.store, log.channel_ids,
@@ -1671,6 +1749,8 @@ async def pre_retrieve(log, text, *, member_wiki=None, guild_id=None, message_id
             if len(people) == 1:
                 if people[0] not in fa_scheduled:
                     jobs.append(run("person_summary", summary_part, people[0]))
+                    jobs.append(run("person_member_info", member_info_part,
+                                    people[0]))
                 if _ACTIVITY_QUESTION.search(text or ""):
                     jobs.append(run("person_activity", activity_part,
                                     people[0]))
@@ -1700,6 +1780,8 @@ async def pre_retrieve(log, text, *, member_wiki=None, guild_id=None, message_id
                     fa_subject["source"] = source
                     fa_subject["person"] = subject
                     jobs.append(run("person_summary", summary_part, subject))
+                    jobs.append(run("person_member_info", member_info_part,
+                                    subject))
                     jobs.append(run("person_first_activity",
                                     first_activity_part, subject))
             if len(people) != 1:
@@ -1821,7 +1903,7 @@ async def pre_retrieve(log, text, *, member_wiki=None, guild_id=None, message_id
         # reached, so resolved questions still answered thin (A-5/A-6).
         selection_order = (
             "claim_check", "person_summary", "github_facts", "person_activity",
-            "person_first_activity", "appellations", "author",
+            "person_first_activity", "person_member_info", "appellations", "author",
             "overview", "member_wiki", "server_wiki", "books",
             "ambiguity", "dense", "context", "reply_graph", "prefetch", "lexical",
         )
@@ -1831,7 +1913,7 @@ async def pre_retrieve(log, text, *, member_wiki=None, guild_id=None, message_id
             "books", "prefetch",
             "lexical", "ambiguity",
             "person_summary", "person_activity", "person_first_activity",
-            "appellations", "overview",
+            "person_member_info", "appellations", "overview",
             "member_wiki", "server_wiki", "author",
         )
     for kind in selection_order:
@@ -1895,6 +1977,7 @@ async def pre_retrieve(log, text, *, member_wiki=None, guild_id=None, message_id
         "first_activity_topic": first_activity_topic,
         "first_activity_subject": fa_subject["source"],
         "first_activity_delivered": "person_first_activity" in counts,
+        "member_info_delivered": "person_member_info" in counts,
         "books_delivered": "books" in counts,
         "github_question": github_direct,
         "github_topic": github_topic,

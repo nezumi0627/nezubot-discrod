@@ -1259,6 +1259,8 @@ def main(argv=None):
     people.add_argument("--rebuild", action="store_true")
     users = subparsers.add_parser("sync-users")
     users.add_argument("--min-messages", type=int, default=50)
+    members = subparsers.add_parser("backfill-members")
+    members.add_argument("--guild-id", required=True)
     search = subparsers.add_parser("search", help="Search with the bot's dense retrieval backend")
     search.add_argument("query")
     scope = search.add_mutually_exclusive_group(required=True)
@@ -1320,6 +1322,21 @@ def main(argv=None):
         result = sync_users(
             store, discord_member_fetcher(token), min_messages=args.min_messages,
             progress=lambda n: print(f"Synced {n} users", flush=True),
+        )
+        print(json.dumps(result, sort_keys=True))
+    elif args.command == "backfill-members":
+        token = os.environ.get("DISCORD_TOKEN", "")
+        if not token:
+            parser.exit(1, "DISCORD_TOKEN is not set\n")
+        from nezubot_discrod.server_log_people import (
+            backfill_members,
+            discord_member_lister,
+        )
+
+        listing = discord_member_lister(token)(args.guild_id)
+        result = backfill_members(
+            store, listing, args.guild_id,
+            progress=lambda n: print(f"Backfilled {n} members", flush=True),
         )
         print(json.dumps(result, sort_keys=True))
     elif args.command in {"import", "backfill-authors"}:
